@@ -1,0 +1,58 @@
+{
+  "Box-like Structures": {
+    "bed": [],
+    "bookshelf": [],
+    "dresser": [],
+    "wardrobe": [],
+    "night stand": [],
+    "tv stand": [],
+    "glass box": [],
+    "door": [],
+    "curtain": [],
+    "mantel": [],
+    "range hood": []
+  },
+  "Legged Furniture": {
+    "chair": [],
+    "bench": [],
+    "sofa": [],
+    "stool": [],
+    "table": [],
+    "desk": []
+  },
+  "Round or Cylindrical Objects": {
+    "bottle": [],
+    "bowl": [],
+    "cup": [],
+    "vase": [],
+    "flower pot": [],
+    "bathtub": [],
+    "sink": [],
+    "toilet": [],
+    "cone": []
+  },
+  "Electronic Devices": {
+    "monitor": [],
+    "laptop": [],
+    "keyboard": [],
+    "radio": [],
+    "xbox": []
+  },
+  "Musical Instruments": {
+    "guitar": [],
+    "piano": []
+  },
+  "Vehicles": {
+    "airplane": [],
+    "car": []
+  },
+  "Natural Forms": {
+    "plant": [],
+    "person": []
+  },
+  "Miscellaneous": {
+    "lamp": [],
+    "tent": [],
+    "stairs": []
+  }
+}
