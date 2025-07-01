@@ -23,3 +23,5 @@ visualize*
 **/analyze_feat_dis.sh
 **/*temp*
 generate_category_name_of_tgt_pc_by_GPT.py
+
+**/gpt4point_evaluation.sh

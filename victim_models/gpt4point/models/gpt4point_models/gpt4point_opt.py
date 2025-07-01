@@ -109,19 +109,35 @@ class GPT4Point_OPT(GPT4Point_Base):
 
     def get_pc_encoder(self):
         class PointEncoder(nn.Module):
-            def __init__(self, point_encoder, pc_projection):
+            def __init__(self, point_encoder, pc_projection, query_tokens, Qformer, opt_proj):
                 super(PointEncoder, self).__init__()
                 self.point_encoder = point_encoder
                 self.pc_projection = pc_projection
+                self.query_tokens = query_tokens
+                self.Qformer = Qformer
+                self.opt_proj = opt_proj
 
             def forward(self, point_clouds):
                 
                 point_embeds = self.point_encoder(point_clouds)
                 point_embeds = point_embeds @ self.pc_projection
-                
-                return point_embeds
             
-        return PointEncoder(self.point_encoder, self.pc_projection)
+                point_embeds = point_embeds.to(torch.float32) 
+                point_atts = torch.ones(point_embeds.size()[:-1], dtype=torch.long).to(
+                    point_clouds.device
+                )
+
+                query_tokens = self.query_tokens.expand(point_embeds.shape[0], -1, -1)
+                query_output = self.Qformer.bert(
+                    query_embeds=query_tokens,
+                    encoder_hidden_states=point_embeds,
+                    encoder_attention_mask=point_atts,
+                    return_dict=True,
+                )
+                inputs_opt = self.opt_proj(query_output.last_hidden_state)
+                return inputs_opt
+            
+        return PointEncoder(self.point_encoder, self.pc_projection, self.query_tokens, self.Qformer, self.opt_proj)
                     
                     
                 
