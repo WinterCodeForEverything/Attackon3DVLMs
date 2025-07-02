@@ -21,7 +21,7 @@ from victim_models.gpt4point.models import load_model_and_preprocess
 
 
 
-from attack_methods.ModelNet40.evaluate import Evaluation
+from attack_methods.Objaverse.evaluate import Evaluation
 from attack_methods.evaluation.pc_evaluator.pc_evaluator import PointCloudEvaluator
 
 #from ._train_adv_pc_trans_ import generate_tgt_caption, generate_and_mask_target
@@ -42,7 +42,7 @@ class ObjectPointCloudDataset(Dataset):
                  pts_processor=None,
                  text_processor=None,
                 #  tokenizer=None,
-                #  pointnum=8192,
+                 pointnum=8192,
                 #  split='train',
                 #  conversation_types=None, # * default is simple_des, used for stage1 pre-train
                  use_color=True,
@@ -75,7 +75,7 @@ class ObjectPointCloudDataset(Dataset):
         self.use_color = use_color
         self.use_normal = use_normal
 
-        # self.pointnum = pointnum
+        self.pointnum = pointnum
         # self.point_backbone_config = data_args.point_backbone_config if data_args is not None else None
         # self.point_indicator = '<point>'
 
@@ -170,12 +170,13 @@ class ObjectPointCloudDataset(Dataset):
             raw_point = np.concatenate((point, white_colors), axis=1)
         elif point.shape[-1] == 9:
             raw_point = point[:, :6]  # * remove the normal channel if it exists
+        elif point.shape[-1] == 6:
+            raw_point = point
 
         # point transform
         if self.pts_processor is not None:
             raw_point = self.pts_processor(raw_point)
-        if raw_point is not None:
-            point[:, :6] = raw_point
+        point[:, :6] = raw_point
         
         label = sources['conversations'][0]['value']
         
@@ -187,46 +188,6 @@ class ObjectPointCloudDataset(Dataset):
             "point": point,
             "label": label
         }
-        # if self.point_indicator in sources[0]['conversations'][0]['value']:
-
-        #     object_id = self.list_data_dict[index]['object_id']
-
-        #     # Point cloud representation
-        #     point_cloud = self._load_point_cloud(object_id) # * N, C
-            
-            
-            
-
-            # if self.normalize_pc:
-            #     point_cloud = self.pc_norm(point_cloud) # * need to norm since point encoder is norm
-
-            #print( point_cloud.shape )
-            #test = torch.from_numpy(point_cloud.astype(np.float32)) 
-        #     if self.tokenizer is None:
-        #         data_dict = dict(
-        #             point_clouds= torch.from_numpy(point_cloud.astype(np.float32)),
-        #             object_ids=object_id
-        #         )
-        #         return data_dict
-
-        #     sources = preprocess_multimodal_point_cloud(
-        #         copy.deepcopy([e["conversations"] for e in sources]), self.point_backbone_config, point_indicator=self.point_indicator)
-        # else:
-        #     sources = copy.deepcopy([e["conversations"] for e in sources])
-
-        # data_dict = preprocess_v1(
-        #     sources,
-        #     self.tokenizer)
-
-        # if isinstance(index, int):
-        #     data_dict = dict(input_ids=data_dict["input_ids"][0],
-        #                      labels=data_dict["labels"][0])
-
-        # # point exist in the data
-        # if self.point_indicator in self.list_data_dict[index]['conversations'][0]['value']:
-        #     data_dict['point_clouds'] = torch.from_numpy(point_cloud.astype(np.float32))
-
-        # return data_dict
 
     def __len__(self):
         """Return number of utterances."""
@@ -518,16 +479,18 @@ def main(args):
                          reinit=True)
         
     model, vis_processors, txt_processors = load_model_and_preprocess(name=args.model_name, model_type=args.model_type, is_eval=True, device=device)
-    # model = model.to(torch.bfloat16)
+    model = model.to(torch.float32)
     for param in model.parameters():
         param.requires_grad = True
         # param = param.to(torch.bfloat16) # * convert model to bfloat16
 
     ori_dataset = load_dataset( data_path= args.data_path, anno_path=args.ori_anno_path, 
-                               pts_processor=vis_processors['eval'], text_processor = txt_processors['eval']) # * defalut config
+                               pts_processor=vis_processors['eval'], txt_processor = txt_processors['eval'],
+                               use_color= args.use_color, use_normal= args.use_normal) # * defalut config
     ori_dataloader = get_dataloader(ori_dataset, args.batch_size, args.shuffle, args.num_workers)
     tgt_dataset = load_dataset(data_path= args.data_path, anno_path=args.tgt_anno_path,
-                               pts_processor=vis_processors['eval'], text_processor = txt_processors['eval']) # * defalut config
+                               pts_processor=vis_processors['eval'], txt_processor = txt_processors['eval'],
+                               use_color= args.use_color, use_normal= args.use_normal) # * defalut config
     tgt_dataloader = get_dataloader(tgt_dataset, args.batch_size, args.shuffle, args.num_workers)
 
 
@@ -537,10 +500,8 @@ def main(args):
     
     adv_func = FeatureSimilarityLoss(pc_encoder)
     
-    # candidate_lists_names = []
-    candidate_lists_names = label_names
     genetrate = ModelGeneration( model, args )
-    eval_func = Evaluation( genetrate, args.gpt_type, candidate_lists_names )
+    eval_func = Evaluation( genetrate, args.gpt_type )
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
                                central_num=args.central_num, total_central_num=args.total_central_num,
@@ -561,9 +522,9 @@ def main(args):
                 print(f"Skip {i}th batch, since it has been evaluated.")
                 continue
             ori_id = ori_data_dict['object_id']
-            ori_pc = ori_data_dict['point'].to(device) # * convert to float32
-            tgt_pc = tgt_data_dict['point'].to(device) # * convert to float32
-            tgt_labels = tgt_data_dict['label'].to(device)
+            ori_pc = ori_data_dict['point'].to(device, dtype= torch.float32) # * convert to float32
+            tgt_pc = tgt_data_dict['point'].to(device, dtype= torch.float32) # * convert to float32
+            tgt_labels = tgt_data_dict['label']
             tgt_id = tgt_data_dict['object_id']
 
             
@@ -577,7 +538,7 @@ def main(args):
                 
             adv_pc, success_num, eval_result = HiT_attacker.attack( ori_pc, tgt_labels, tgt_feature )
             success_nums += success_num
-            for j in range(ori_id.shape[0]):
+            for j in range(ori_pc.shape[0]):
                 if i * args.batch_size + j < eval_attack_num:
                     continue
                 eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
@@ -592,7 +553,6 @@ def main(args):
                 adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
                 adv_pc_list.append(ap)
                 adv_label_list.append(adv_label)
-    
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     
@@ -671,16 +631,14 @@ if __name__ == '__main__':
     
 
     # data 
-    #parser.add_argument("--data_path", type=str, default="data/modelnet40", required=False)
-    parser.add_argument("--ori_data_path", type=str, default='./data')
-    parser.add_argument("--tgt_data_path", type=str, default='./data')
-    parser.add_argument("--subset_nums", type=int, default=-1)
-    #parser.add_argument("--pointnum", type=int, default=8192)
-    parser.add_argument("--ori_split", type=str, default='test')
-    parser.add_argument("--tgt_split", type=str, default='target')
+    parser.add_argument("--data_path", type=str, default="data/objaverse_data", required=False)
+    parser.add_argument("--ori_anno_path", type=str, default="data/anno_data/PointLLM_brief_description_ori_200_GT.json", required=False)
+    parser.add_argument("--adv_anno_path", type=str, default="data/anno_data/PointLLM_brief_description_adv_200_GT.json", required=False)
+    parser.add_argument("--tgt_anno_path", type=str, default="data/anno_data/PointLLM_brief_description_tgt_200_GT.json", required=False)
+    parser.add_argument("--pointnum", type=int, default=8192)
     parser.add_argument("--use_color",  action="store_true", default=False)
-    #parser.add_argument("--use_normal",  action="store_true", default=False)
-    parser.add_argument("--output_pc_file", type=str, default="data/modelnet40_adv.dat ")
+    parser.add_argument("--use_normal",  action="store_true", default=False)
+    parser.add_argument("--output_pc_path", type=str, default="data/adv_pc", required=False)
     # * data loader, batch_size, shuffle, num_workers
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--shuffle", type=bool, default=False)
