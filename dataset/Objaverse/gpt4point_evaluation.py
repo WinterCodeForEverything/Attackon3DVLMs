@@ -51,7 +51,7 @@ class ObjectPointCloudDataset(Dataset):
                  pts_processor=None,
                  text_processor=None,
                 #  tokenizer=None,
-                #  pointnum=8192,
+                pointnum=8192,
                 #  split='train',
                 #  conversation_types=None, # * default is simple_des, used for stage1 pre-train
                  use_color=True,
@@ -84,7 +84,7 @@ class ObjectPointCloudDataset(Dataset):
         self.use_color = use_color
         self.use_normal = use_normal
 
-        # self.pointnum = pointnum
+        self.pointnum = pointnum
         # self.point_backbone_config = data_args.point_backbone_config if data_args is not None else None
         # self.point_indicator = '<point>'
 
@@ -179,14 +179,16 @@ class ObjectPointCloudDataset(Dataset):
             raw_point = np.concatenate((point, white_colors), axis=1)
         elif point.shape[-1] == 9:
             raw_point = point[:, :6]  # * remove the normal channel if it exists
+        else:
+            raw_point = point
 
         # point transform
         if self.pts_processor is not None:
             raw_point = self.pts_processor(raw_point)
-        if raw_point is not None:
             point[:, :6] = raw_point
         
-        label = sources['conversations'][0]['value']
+        assert sources['conversations'][1]['from'] == 'gpt'
+        label = sources['conversations'][1]['value']
         
         if self.text_processor is not None: 
             label = self.text_processor(label)
@@ -242,28 +244,28 @@ class ObjectPointCloudDataset(Dataset):
         return len(self.list_data_dict)
  
 
-def init_model(model_name):
-    # Model
-    disable_torch_init()
-    model_name = os.path.expanduser(model_name)
+# def init_model(model_name):
+#     # Model
+#     disable_torch_init()
+#     model_name = os.path.expanduser(model_name)
 
-    # * print the model_name (get the basename)
-    print(f'[INFO] Model name: {os.path.basename(model_name)}')
+#     # * print the model_name (get the basename)
+#     print(f'[INFO] Model name: {os.path.basename(model_name)}')
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=torch.bfloat16).to(device)
-    model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
+#     tokenizer = AutoTokenizer.from_pretrained(model_name)
+#     model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=torch.bfloat16).to(device)
+#     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
 
-    conv_mode = "vicuna_v1_1"
+#     conv_mode = "vicuna_v1_1"
 
-    conv = conv_templates[conv_mode].copy()
+#     conv = conv_templates[conv_mode].copy()
 
-    return model, tokenizer, conv
-
-
+#     return model, tokenizer, conv
 
 
-def load_dataset(data_path, anno_path, pts_processor, txt_processor, use_color, use_normal):
+
+
+def load_dataset(data_path, anno_path, pts_processor, txt_processor, use_color=True, use_normal=True):
     print("Loading validation datasets.")
     dataset = ObjectPointCloudDataset(
         data_path=data_path,
@@ -320,7 +322,7 @@ def main(args):
         os.makedirs(args.output_dir)
 
     # * output file 
-    output_file = f"Objaverse_classification_prompt{args.prompt_index}.json"
+    output_file = f"GPT4Point_Objaverse_classification_prompt{args.prompt_index}.json"
     output_file_path = os.path.join( args.output_dir, output_file)
 
     model, vis_processors, txt_processors = load_model_and_preprocess(name=args.model_name, model_type=args.model_type, is_eval=True, device=device)
@@ -329,25 +331,45 @@ def main(args):
     
     evaluator = Evaluation(generater, args.gpt_type)
 
-    dataset = load_dataset( data_path= args.data_path, anno_path=args.anno_path, 
-                               pts_processor=vis_processors['eval'], text_processor = txt_processors['eval']) # * defalut config
+    dataset = load_dataset( data_path=args.data_path, anno_path=args.anno_path, 
+                               pts_processor=vis_processors['eval'], txt_processor = txt_processors['eval']) # * defalut config
     dataloader = get_dataloader(dataset, args.batch_size, args.shuffle, args.num_workers)
     
     
     saved_results = []
     average_accuracy = 0.0
-    for data_dict in tqdm(range(len(dataloader))):
-        obj_id = data_dict['object_id']
-        obj_pc = data_dict['point'].to(device) # * convert to float32
-        obj_label = data_dict['label']
-        
-        accuracies, results = evaluator( obj_pc, obj_label )
-        
-        for j in range(obj_pc.shape[0]):
-            result = results[j].copy()
-            result['object_id'] = obj_id[j]
-            saved_results.append(result)
-            average_accuracy += accuracies[j]
+    
+    if os.path.exists(output_file_path):
+        print(f"[INFO] {output_file_path} already exists, loading the results...")
+        with open(output_file_path, 'r') as fp:
+            saved = json.load(fp)
+            saved_results = saved['results']
+            average_accuracy = saved['accuracy'] * len(saved_results)# * total accuracy
+            print(f"[INFO] Loaded {len(saved_results)} results with correct preditiction: {average_accuracy:.4f}")
+
+    
+    try:
+        for i, data_dict in tqdm(enumerate(dataloader)):
+            if i* args.batch_size < len(saved_results):
+                # * if the result already exists, skip it
+                continue
+            obj_id = data_dict['object_id']
+            obj_pc = data_dict['point'].to(device) # * convert to float32
+            obj_label = data_dict['label']
+
+            
+            accuracies, results = evaluator( obj_pc, obj_label )
+            
+            for j in range(obj_pc.shape[0]):
+                if i* args.batch_size + j < len(saved_results):
+                    # * if the result already exists, skip it
+                    continue
+                result = results[j].copy()
+                result['object_id'] = obj_id[j]
+                saved_results.append(result)
+                average_accuracy += accuracies[j]
+    except Exception as e:
+        print(f"[ERROR] An error occurred during evaluation: {e}")   
     
     average_accuracy /= len(saved_results)
     
@@ -360,9 +382,6 @@ def main(args):
     with open(output_file_path, 'w') as fp:
         json.dump(saved, fp, indent=4)
     
-            
-            
-            
             
 
     
@@ -399,6 +418,11 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    # model
+    parser.add_argument("--model_name", type=str, \
+        default="gpt4point_opt") 
+    parser.add_argument("--model_type", type=str, \
+        default="gpt4point_opt2.7b") 
     parser.add_argument("--do_sample",  action="store_true", default=False)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max_length", type=int, default=2048)

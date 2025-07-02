@@ -64,11 +64,11 @@ def save_point_cloud(input_path, object_id, output_path, vis_path = None):
         np.savetxt(os.path.join(vis_path, filename.replace('.npy', '.txt')), point_cloud)
     
 if __name__ == "__main__":
-    input_pc_path = '/mnt/ssd/liuchao/PointLLM/Objaverse_npy_cp'
-    ori_cap = "/home/liuchao/PointLLM2/objaverse_result/objaverse_eval/chosen_gpt_eval_results.json"
+    input_pc_path = '/mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_npy_gpt4point_cp'
+    ori_cap = "/mnt/ssd/liuchao/Attackon3DVLMs/GPT4Point_Objaverse_classification_prompt0_correct_prediction.json"
     #'/mnt/ssd/liuchao/PointLLM/PointLLM_brief_description_adv_200.json'
-    output_pc_path = '/mnt/ssd/liuchao/PointLLM/Objaverse_npy_cp_normals'
-    visal_path = '/mnt/ssd/liuchao/PointLLM/Objaverse_npy_cp_with_normals_visual'
+    output_pc_path = '/mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_npy_gpt4point_cp_normals'
+    visal_path = '/mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_npy_gpt4point_cp_normals_visal'
     
     if not os.path.exists(output_pc_path):
         os.makedirs(output_pc_path)

@@ -23,6 +23,7 @@ class Evaluation(torch.nn.Module):
         super(Evaluation, self).__init__()
         self.Generation = Generation
         self.gpt_prompt = gpt4_open_free_from_cls_prompt 
+        self.invalid_responses = 0
         
 
         self.default_chat_parameters = {

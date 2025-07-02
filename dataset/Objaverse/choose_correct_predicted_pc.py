@@ -1,16 +1,16 @@
 import os
 import json
-import numpy as np
-import random
-import pickle
+# import numpy as np
+# import random
+# import pickle
 import shutil
 
 
 if __name__ == '__main__':
-    gpt_eval_file = '/home/liuchao/PointLLM2/objaverse_result/objaverse_eval/PointLLM_brief_description_val_3000_GT_Objaverse_classification_prompt0_evaluated_gpt-4o-mini.json'
+    gpt_eval_file = "/mnt/ssd/liuchao/Attackon3DVLMs/GPT4Point_Objaverse_classification_prompt0.json"
     input_path = "/mnt/ssd/liuchao/PointLLM/Objaverse_npy"
-    output_path = "/mnt/ssd/liuchao/PointLLM/Objaverse_npy_cp"
-    output_eval_path = "/home/liuchao/PointLLM2/objaverse_result/objaverse_eval"
+    output_path = "/mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_npy_gpt4point_cp"
+    output_eval_file = "/mnt/ssd/liuchao/Attackon3DVLMs/GPT4Point_Objaverse_classification_prompt0_correct_prediction.json"
     
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -23,7 +23,7 @@ if __name__ == '__main__':
     chosen_index = []
     chosen_gpt_eval_results = []
     for item in gpt_eval_results:
-        if item['gpt_cls_result'] == 'T':
+        if item['cls_result'] == 'T':
             chosen_index.append(item['object_id'])
             chosen_gpt_eval_results.append(item)
             
@@ -78,7 +78,7 @@ if __name__ == '__main__':
     #     pickle.dump((sampled_pc_list, sample_label_list), f)
         
     # Save chosen gpt eval results
-    with open(os.path.join(output_eval_path, "chosen_gpt_eval_results.json"), "w") as f:
+    with open(output_eval_file, "w") as f:
         json.dump(chosen_gpt_eval_results, f, indent=2)
             
     
