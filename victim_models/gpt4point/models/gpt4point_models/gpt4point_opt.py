@@ -106,8 +106,24 @@ class GPT4Point_OPT(GPT4Point_Base):
                 param.requires_grad = False
             logging.info("freeze point encoder")
 
-
     def get_pc_encoder(self):
+        class PointEncoder(nn.Module):
+            def __init__(self, point_encoder, pc_projection):
+                super(PointEncoder, self).__init__()
+                self.point_encoder = point_encoder
+                self.pc_projection = pc_projection
+
+            def forward(self, point_clouds):
+                
+                point_embeds = self.point_encoder(point_clouds)
+                point_embeds = point_embeds @ self.pc_projection
+            
+                return point_embeds
+            
+        return PointEncoder(self.point_encoder, self.pc_projection)
+
+
+    def get_pc_encoder_qformer(self):
         class PointEncoder(nn.Module):
             def __init__(self, point_encoder, pc_projection, query_tokens, Qformer, opt_proj):
                 super(PointEncoder, self).__init__()
