@@ -1,7 +1,0 @@
-NAME: ModelNet
-DATA_PATH: /mnt/ssd/liuchao/PointLLM
-NUM_CATEGORY: 40
-USE_NORMALS: TRUE
-npoints: 8192
-random_sampling: TRUE
-use_height: FALSE

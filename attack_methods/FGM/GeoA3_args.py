@@ -14,7 +14,7 @@ import torch
 import matplotlib
 import matplotlib.pyplot as plt
 import seaborn
-from whitebox.pointnet2_ops_lib.pointnet2_ops import pointnet2_utils
+from attack_methods.pointnet2_ops_lib.pointnet2_ops import pointnet2_utils
 
 matplotlib.use('Agg')
 seaborn.set()

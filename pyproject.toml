@@ -15,13 +15,13 @@ classifiers = [
 dependencies = [
     "accelerate", "einops", "fastapi", "gradio", "markdown2[all]", "numpy",
     "requests", "sentencepiece", "tokenizers==0.15.1",
-    "torch>=2.0", "torchvision", "uvicorn", "wandb",
+    "torch>=2.0", "torchvision", "pytorch3d", "uvicorn", "wandb",
     "shortuuid",
     "deepspeed", "peft",
     "transformers==4.37.2",
     "openai", "tqdm",
     "easydict", "timm==0.4.12", "ftfy==6.0.1", "regex", "open3d==0.16.0", "h5py", "termcolor",
-    "plyfile", "nltk", "rouge", "scikit-learn", "py-rouge"
+    "plyfile", "nltk", "rouge", "scikit-learn", "py-rouge", "mayavi", "seaborn", "omegaconf"
 ]
 
 [tool.setuptools.packages.find]

@@ -106,8 +106,8 @@ class HiT_ADV:
         ori_kappa_std = self._get_kappa_std_ori(ori_data, ori_normal, k=self.curv_loss_knn)  # [b, n]
         grad = self.get_gradient(ori_pc, target, tgt_feature)
         
-        ##temp
-        grad = -1 * grad 
+        # ##temp
+        # grad = -1 * grad 
     
         with (torch.no_grad()):
             center = torch.median(ori_data, dim=-1)[0].clone().detach()  # [B, 3]
@@ -338,11 +338,12 @@ class HiT_ADV:
                         #'o_bestscore:': o_bestscore.mean(),
                         #'o_bestdist:': o_bestdist.mean(),
                     })
-            try:        
+            # try:    
+            if 1:    
                 eval_adv_data = input_adv_data.detach()
                 success_attack, eval_results = self.eval_func(eval_adv_data, target)
-            except:
-                print('Error in eval_func')
+            # except:
+            #     print('Error in eval_func')
             
             for e in range(B):
                 if success_attack[e] == 1 and bestdist[e] <= o_bestdist[e]:
