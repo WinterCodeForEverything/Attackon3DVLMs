@@ -115,7 +115,7 @@ class ObjaverseDataset(Dataset):
             has_normal = True
             
         if has_normal and self.redirect_normals:
-            print("Redirecting normals to point outward.")
+            # print("Redirecting normals to point outward.")
             point_cloud = redirect_normals(point_cloud)
         # point_cloud = np.concatenate((point_cloud, normals), axis=1)
             

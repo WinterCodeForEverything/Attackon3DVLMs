@@ -87,9 +87,10 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
     return dataloader
 
 class FeatureSimilarityLoss(torch.nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, is_targeted=True):
         super(FeatureSimilarityLoss, self).__init__()
         self.model = model
+        self.is_targeted = is_targeted
         
     def forward(self, adv_pc, tgt_feature):
         
@@ -106,7 +107,10 @@ class FeatureSimilarityLoss(torch.nn.Module):
         # Compute the embedding similarity
         embedding_sim = torch.mean(torch.sum(adv_feature * tgt_feature, dim=2), dim=1)
         
-        loss = 1 - embedding_sim 
+        if self.is_targeted:
+            loss = 1 - embedding_sim 
+        else:
+            loss = embedding_sim
         
         return loss
 
@@ -182,6 +186,7 @@ def main(args):
     
     #lr = args.lr
     #budget = args.budget
+    is_targeted = args.is_targeted
     dataset_type = args.dataset_type
     assert dataset_type in ['ModelNet', 'Objaverse'], f"Unsupported dataset type: {dataset_type}"
     output_pc_path = args.output_pc_path
@@ -238,7 +243,7 @@ def main(args):
                     ori_pc = np.load(os.path.join(args.ori_data_path, ori_pc_name))
                     ori_pc_list.append(ori_pc)
                     
-        if args.redirect_normals and len(adv_pc_list) != 0 and len(ori_pc_list) != 0:
+        if args.redirect_normal and len(adv_pc_list) != 0 and len(ori_pc_list) != 0:
             ori_pc_list = [redirect_normals(pc) for pc in ori_pc_list]
             adv_pc_list = [redirect_normals(pc) for pc in adv_pc_list]
     
@@ -261,10 +266,10 @@ def main(args):
 
     model, tokenizer, conv = init_model(args)
     genetration = ModelGeneration( model, tokenizer, conv, args )
-    eval_func = GPTEvaluation( genetration, args.gpt_type )
+    eval_func = GPTEvaluation( genetration, args.gpt_type, is_targeted=is_targeted )
     
     pc_encoder = model.get_pc_encoder()
-    adv_func = FeatureSimilarityLoss(pc_encoder)
+    adv_func = FeatureSimilarityLoss(pc_encoder, is_targeted=is_targeted )
 
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
@@ -293,18 +298,28 @@ def main(args):
             tgt_id = tgt_data_dict['object_id']
             ori_pc = ori_data_dict['point_cloud'].to(device, dtype= model.dtype) 
             tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype=  model.dtype) 
-            if dataset_type == 'ModelNet':
-                tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
+            if is_targeted:
+                if dataset_type == 'ModelNet':
+                    tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
+                else:
+                    tgt_labels = tgt_data_dict['label']
+                with torch.no_grad():
+                    tgt_feature = pc_encoder(tgt_pc[..., :6])
+                    if torch.isnan(tgt_feature).any():
+                        print(f"NaN detected in tgt_feature. Skip this sample.")
+                        continue
+                    tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
             else:
-                tgt_labels = tgt_data_dict['label']
-
-            
-            with torch.no_grad():
-                tgt_feature = pc_encoder(tgt_pc[..., :6])
-                if torch.isnan(tgt_feature).any():
-                    print(f"NaN detected in tgt_feature. Skip this sample.")
-                    continue
-                tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
+                if dataset_type == 'ModelNet':
+                    tgt_labels =  [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+                else:
+                    tgt_labels = ori_data_dict['label']
+                with torch.no_grad():
+                    tgt_feature = pc_encoder(ori_pc[..., :6])
+                    if torch.isnan(tgt_feature).any():
+                        print(f"NaN detected in tgt_feature. Skip this sample.")
+                        continue
+                    tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
 
                 
             adv_pc, success_num, eval_result = HiT_attacker.attack( ori_pc, tgt_labels, tgt_feature )
@@ -312,22 +327,37 @@ def main(args):
             for j in range(ori_pc.shape[0]):
                 if i * args.batch_size + j < eval_attack_num:
                     continue
-                eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
-            #adv_pc = torch.from_numpy(adv_pc).to(device)
+                if is_targeted:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                else:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
+            
             eval_results.extend(eval_result)
             
-            saved_label = tgt_data_dict['label']
-
-            ori_pc = ori_pc.float().cpu().numpy()
-            for b, (oid, op, tid, ap, adv_label) in enumerate( zip(ori_id, ori_pc, tgt_id, adv_pc, saved_label) ):
-                if dataset_type == 'ModelNet':
-                    obj_id_list.append(oid.item())
-                else:
-                    obj_id_list.append(f"{oid}_{tid}")
-                    adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
-                ori_pc_list.append(op)
-                adv_pc_list.append(ap)
-                adv_label_list.append(adv_label)
+            ori_pc = ori_pc.float().cpu().numpy() 
+            if is_targeted:
+                saved_label = tgt_data_dict['label']
+                for b, (oid, op, tid, ap, adv_label) in enumerate( zip(ori_id, ori_pc, tgt_id, adv_pc, saved_label) ):
+                    if dataset_type == 'ModelNet':
+                        obj_id_list.append(oid.item())
+                    else:
+                        obj_id_list.append(f"{oid}_{tid}")
+                        adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
+                    ori_pc_list.append(op)
+                    adv_pc_list.append(ap)
+                    adv_label_list.append(adv_label)
+            else:
+                saved_label = ori_data_dict['label']
+                for b, (oid, op, ap, adv_label) in enumerate( zip(ori_id, ori_pc, adv_pc, saved_label) ):
+                    if dataset_type == 'ModelNet':
+                        obj_id_list.append(oid.item())
+                    else:
+                        obj_id_list.append(f"{oid}")
+                        adv_pc_file_name_list.append(f"{oid}_{args.pointnum}.npy")
+                    ori_pc_list.append(op)
+                    adv_pc_list.append(ap)
+                    adv_label_list.append(adv_label)
+            # break
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     
@@ -373,6 +403,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--top_p", type=float, default=0.95)
     
+    parser.add_argument("--is_targeted",  action="store_true", default=False)
     parser.add_argument("--attack_lr", type=float, default=0.01)
     parser.add_argument('--cd_weight', type=float, default=0.0001, help='cd_weight')
     parser.add_argument('--ker_weight', type=float, default=1., help='ker_weight')

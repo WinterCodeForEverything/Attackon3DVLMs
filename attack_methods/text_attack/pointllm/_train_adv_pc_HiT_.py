@@ -402,8 +402,10 @@ def main(args):
             for j in range(ori_pc.shape[0]):
                 if i * args.batch_size + j < eval_attack_num:
                     continue
-                eval_result[j].update({'object_id': f"{ori_id[j]}"})
-            #adv_pc = torch.from_numpy(adv_pc).to(device)
+                if is_targeted:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                else:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
             eval_results.extend(eval_result)
             
             ori_pc = ori_pc.float().cpu().numpy()

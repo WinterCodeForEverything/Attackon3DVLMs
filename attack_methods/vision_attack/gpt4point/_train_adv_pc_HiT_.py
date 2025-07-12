@@ -290,7 +290,7 @@ def main(args):
     adv_func = FeatureSimilarityLoss(pc_encoder)
     
     genetrate = ModelGeneration( model, args )
-    eval_func = GPTEvaluation( genetrate, args.gpt_type )
+    eval_func = GPTEvaluation( genetrate, args.gpt_type, is_targeted=is_targeted)
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
                                central_num=args.central_num, total_central_num=args.total_central_num,
@@ -348,8 +348,11 @@ def main(args):
             for j in range(ori_pc.shape[0]):
                 if i * args.batch_size + j < eval_attack_num:
                     continue
-                eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
-            #adv_pc = torch.from_numpy(adv_pc).to(device)
+                if is_targeted:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                else:
+                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
+            
             eval_results.extend(eval_result)
 
             ori_pc = ori_pc.float().cpu().numpy() 
@@ -422,6 +425,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--top_p", type=float, default=0.95)
     
+    parser.add_argument("--is_targeted",  action="store_true", default=False)
     parser.add_argument("--attack_lr", type=float, default=0.01)
     parser.add_argument('--cd_weight', type=float, default=0.0001, help='cd_weight')
     parser.add_argument('--ker_weight', type=float, default=1., help='ker_weight')
