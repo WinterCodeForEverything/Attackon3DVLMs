@@ -290,7 +290,8 @@ def main(args):
         adv_annos = json.load(open(args.adv_anno_path, "r"))
     
     success_rate = 0.0
-    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index] }
+    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index],
+                     "saved_pc_path": output_pc_path }
     eval_results = []
     ori_pc_list, obj_id_list = [], []
     adv_pc_file_name_list = []

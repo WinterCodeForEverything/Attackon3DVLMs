@@ -338,12 +338,9 @@ class HiT_ADV:
                         #'o_bestscore:': o_bestscore.mean(),
                         #'o_bestdist:': o_bestdist.mean(),
                     })
-            # try:    
-            if 1:    
-                eval_adv_data = input_adv_data.detach()
-                success_attack, eval_results = self.eval_func(eval_adv_data, target)
-            # except:
-            #     print('Error in eval_func')
+
+            eval_adv_data = input_adv_data.detach()
+            success_attack, eval_results = self.eval_func(eval_adv_data, target)
             
             for e in range(B):
                 if success_attack[e] == 1 and bestdist[e] <= o_bestdist[e]:
