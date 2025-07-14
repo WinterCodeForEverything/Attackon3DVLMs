@@ -285,7 +285,7 @@ def main(args):
 
 
 
-    pc_encoder = model.get_pc_encoder()
+    pc_encoder = model.get_pc_encoder_qformer()
 
     adv_func = FeatureSimilarityLoss(pc_encoder)
     
