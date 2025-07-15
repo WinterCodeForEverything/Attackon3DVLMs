@@ -1,0 +1,2 @@
+python transfer_dat_to_xyz.py --input_pc_file /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_pointllm_tgt_8192pts.dat \
+                            --output_pc_path /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_pointllm_tgt_8192pts_xyz
