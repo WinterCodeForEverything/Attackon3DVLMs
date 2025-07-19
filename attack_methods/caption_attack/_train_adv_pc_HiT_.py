@@ -2,7 +2,7 @@
 import argparse
 import numpy as np
 import torch
-import torch.nn.functional as F
+# from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 
@@ -15,15 +15,19 @@ from attack_methods.ShapeAttack.HiT_ADV import HiT_ADV
 import pickle
 import json
 
-from victim_models.gpt4point.models import load_model_and_preprocess
 from dataset.data.modelnet import ModelNet
 from dataset.data.objaverse import ObjaverseDataset
-from dataset.data.utils import redirect_normals
+from dataset.data.utils import compute_normals, redirect_normals
+
+from victim_models.pointllm.conversation import conv_templates, SeparatorStyle
+from victim_models.pointllm.utils import disable_torch_init
+from victim_models.pointllm.model import *
+from victim_models.pointllm.model.utils import KeywordsStoppingCriteria
 
 from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
-from attack_methods.evaluation.pc_evaluator.pc_evaluator import PointCloudEvaluator
+from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -35,6 +39,45 @@ PROMPT_LISTS = [
     "What is this?",
     "This is an object of "
 ]
+
+def init_model(args):
+    # Model
+    disable_torch_init()
+    model_name = os.path.expanduser(args.model_name)
+
+    # * print the model_name (get the basename)
+    print(f'[INFO] Model name: {os.path.basename(model_name)}')
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=torch.bfloat16).to(device)
+    model.get_model().fix_pointnet = False
+    model.get_model().fix_llm = False
+    model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
+    
+    conv_mode = "vicuna_v1_1"
+
+    conv = conv_templates[conv_mode].copy()
+    
+    #stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    qs = PROMPT_LISTS[args.prompt_index]
+
+    point_backbone_config = model.get_model().point_backbone_config
+    point_token_len = point_backbone_config['point_token_len']
+    default_point_patch_token = point_backbone_config['default_point_patch_token']
+    default_point_start_token = point_backbone_config['default_point_start_token']
+    default_point_end_token = point_backbone_config['default_point_end_token']
+    mm_use_point_start_end = point_backbone_config['mm_use_point_start_end']
+    
+    if mm_use_point_start_end:
+        qs = default_point_start_token + default_point_patch_token * point_token_len + default_point_end_token + '\n' + qs
+    else:
+        qs = default_point_patch_token * point_token_len + '\n' + qs
+    
+    #qs = qs + "This is an object of "
+    conv.append_message(conv.roles[0], qs)
+
+    return model, tokenizer, conv
+
 
 
 def load_dataset(dataset_type, data_path, anno_path=None, normalized_pc=True,
@@ -61,229 +104,166 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return dataloader
 
+# def generate_tgt_caption(tgt_labels, prompt_index=0):
+#     tgt_captions = []
+#     for label_name in range(tgt_labels):
+#         if prompt_index == 0:
+#             tgt_caption = f"This is an object of {label_name}."
+#         elif prompt_index == 1:
+#             tgt_caption = label_name
+#         tgt_captions.append(tgt_caption)
+
+#     return tgt_captions
+
+
 class LLMLoss(torch.nn.Module):
-    def __init__(self, model, allowed_class=None, text_processor=None, is_targeted=True):
+    def __init__(self, model, tokenizer, conv, prompt_index, is_targeted=True):
         super(LLMLoss, self).__init__()
         self.model = model
-        self.allowed_class = allowed_class
-        # self.vis_processors = vis_processors
-        self.text_processor = text_processor
-        # print("vis_processors:", vis_processors)
-        # print("txt_processors:", txt_processors)
+        self.tokenizer = tokenizer
+        self.prompt_index = prompt_index
+        self.conv = conv
         self.is_targeted = is_targeted
     
-        
+    def generate_and_mask_target(
+        self,
+        conversations
+    ):
+
+        # Tokenize conversations
+        input_ids = self.tokenizer(
+            conversations,
+            return_tensors="pt",
+            padding="longest",
+            max_length= self.tokenizer.model_max_length,
+            truncation=True,
+        ).input_ids
+        targets = input_ids.clone()
+
+        # Mask targets
+        sep = self.conv.sep + self.conv.roles[1] + ": " 
+        # print(f"sep: {sep}")
+        for conversation, target in zip(conversations, targets):
+            total_len = int(target.ne(self.tokenizer.pad_token_id).sum())
+
+            rounds = conversation.split(self.conv.sep2)
+            cur_len = 1
+            target[:cur_len] = IGNORE_INDEX
+            for i, rou in enumerate(rounds):
+                if rou == "":
+                    break
+
+                parts = rou.split(sep)
+                if len(parts) != 2: # * can handle padded tokens
+                    break
+                parts[0] += sep
+                round_len = len(self.tokenizer(rou).input_ids)
+                instruction_len = len(self.tokenizer(parts[0]).input_ids) - 2
+
+                target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+
+                cur_len += round_len
+            target[cur_len:] = IGNORE_INDEX # * this is necessary for padded tokens
+
+            if cur_len < self.tokenizer.model_max_length:
+                if cur_len != total_len: # * unk tokens in the dialogue will cause this.
+                    target[:] = IGNORE_INDEX
+                    print(
+                        f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
+                        f" (ignored)"
+                    )
+                    
+            # # Detokenize targets to text
+            # detokenized_targets = tokenizer.batch_decode(targets, skip_special_tokens=True)
+            # print(f"Detokenized targets: {detokenized_targets}")
+
+        return input_ids, targets
+
+
     def forward(self, adv_pc, tgt_labels ):
         
         if adv_pc.shape[-1] > 6:
             adv_pc = adv_pc[..., :6]
         
-        captions = []
-        for label in tgt_labels:
-            caption = label
-            if self.text_processor is not None:
-                caption = self.text_processor(caption)
-            captions.append(caption)
-
-        sample = {
-            "point": adv_pc,
-            "text_input": captions,
-        }
+        # tgt_captions = generate_tgt_caption( tgt_labels, 1 )
+        tgt_captions = tgt_labels
         
-        outputs, targets = self.model(
-            sample
+        conversations = []
+        for tgt_caption in tgt_captions:
+            tgt_conv = self.conv.copy()
+            tgt_conv.append_message( self.conv.roles[1], tgt_caption )
+            conversations.append( tgt_conv.get_prompt() )
+        
+        input_caption_ids, tgt_caption_ids = self.generate_and_mask_target(
+            conversations
         )
-        # print(outputs["logits"].shape)
         
-        loss = self.compute_loss(outputs["logits"], targets)
-        
-        if not self.is_targeted:
-            loss = -1 * loss  # * for untargeted attack, we want to maximize the loss
-        
+        outputs = self.model(
+                input_ids=input_caption_ids.to(device), 
+                point_clouds= adv_pc.to(self.model.dtype),
+                labels= tgt_caption_ids.to(device),
+                return_dict=True,
+                    )
+        if self.is_targeted:
+            loss = outputs.loss
+        else:
+            loss = -1 * outputs.loss
+        # print(f"loss: {loss}")
+
         return loss
-        
-     
-    def compute_loss(self, logits, labels):
-        """
-        Compute the loss for the adversarial point clouds.
-        """
-        # Shift so that tokens < n predict n
-        shift_logits = logits[..., :-1, :].contiguous()  # * B, L, V
-        vocab_size = shift_logits.shape[-1]
-        shift_labels = labels[..., 1:].contiguous()  # * B, L
-        B = shift_labels.shape[0]
-        # Flatten the tokens
-        loss_fct = CrossEntropyLoss(reduction='none')  # Compute loss per token, ignoring -100
-        shift_logits = shift_logits.view(-1, vocab_size)
-        shift_labels = shift_labels.view(-1)
-        # Enable model/pipeline parallelism
-        shift_labels = shift_labels.to(shift_logits.device)
-        loss = loss_fct(shift_logits, shift_labels)
-        loss = loss.view(B, -1)
-        loss = loss.sum(dim=1) / (loss != 0).sum(dim=1).clamp(min=1)  # Compute mean loss per batch, ignoring padding
-        
-        return loss   
-
-
-    def multi_target_ce(
-        self,
-        logits: torch.Tensor,
-        targets: torch.LongTensor,
-        # allowed: torch.Tensor,
-        ignore_index: int = -100,
-        kappa: float = 0.0,
-    ) -> torch.Tensor:
-        """
-        Compute per-sample multi-target margin loss over time (or spatial) dimension.
-
-        Args:
-            logits:     (B, L, C) float tensor of model outputs.
-            targets:    (B, L)   long tensor of true labels, or ignore_index.
-            allowed:    bool tensor of shape (B, L, C) or (C,),
-                        where True indicates a valid target class.
-            ignore_index: int label in `targets` to skip.
-            kappa:      margin constant; loss = ReLU(true_logit - lse_allowed + kappa).
-
-        Returns:
-            loss: Tensor of shape (B,) giving the mean loss over valid positions for each sample.
-        """
-        B, L, C = logits.shape
-        device = logits.device
-
-        allowed = self.allowed_class
-        # Broadcast allowed mask if needed
-        if allowed.dim() == 1:
-            allowed = allowed.view(1, 1, C).expand(B, L, C)
-        allowed = allowed.to(device)
-
-        # Compute per-position loss
-        # Gather true-logit: shape (B, L)
-        idx = torch.arange(B, device=device)[:, None]
-        pos = torch.arange(L, device=device)[None, :]
-        true_logit = logits[idx, pos, targets.clamp(min=0)]  # we’ll mask out ignore_index next
-
-        # Mask out invalid classes to -inf, then logsumexp over C
-        inf_logits = logits.masked_fill(~allowed, float('-inf'))
-        lse_allowed = torch.logsumexp(inf_logits, dim=2)    # shape (B, L)
-
-        # Raw margin loss per position
-        loss_raw = F.relu(true_logit - lse_allowed + kappa)  # (B, L)
-
-        # Mask out positions where targets == ignore_index
-        valid = (targets != ignore_index)                     # (B, L)
-        loss_raw = loss_raw * valid.to(loss_raw.dtype)
-
-        # Sum and count per sample
-        sum_loss   = loss_raw.sum(dim=1)                      # (B,)
-        count_loss = valid.sum(dim=1).clamp(min=1).to(sum_loss.dtype)  # (B,)
-
-        # Per-sample mean (zero if no valid positions)
-        loss_per_sample = sum_loss / count_loss               # (B,)
-
-        return loss_per_sample
-
 
 class ModelGeneration(torch.nn.Module):
-    def __init__(self, model, args):
+    def __init__(self, model, tokenizer, conv,  args):
         super(ModelGeneration, self).__init__()
         self.model = model
+        # self.conv = conv
+        self.tokenizer = tokenizer
+        self.temperature = args.temperature
+        self.top_k = args.top_k
+        self.top_p = args.top_p
         self.num_beams = args.num_beams
         self.max_length = args.max_length
-        self.top_p = args.top_p
-        self.temperature = args.temperature
+        # stopping_criteria
         
-    def generate(self, points):
-        """
-        Generate the output of the model.
-        """
+        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+
+        prompt = conv.get_prompt()
+        inputs = tokenizer([prompt])
         
-        samples = {
-            "point": points
-        }
-        outputs = self.model.generate(
-            samples,
-            num_beams=self.num_beams,
-            use_nucleus_sampling= True if self.temperature > 0.0 else False,
-            max_length=self.max_length,
-            top_p=self.top_p,
-            temperature=self.temperature if self.temperature > 0.0 else None,
-        )
+        input_ids_ = torch.as_tensor(inputs.input_ids).cuda() # * tensor of 1, L
+        self.input_ids_ = input_ids_
         
+        self.stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids_)
+        
+
+        
+    def generate( self, point_clouds ):
+        
+        B = point_clouds.shape[0]
+        input_ids = self.input_ids_.repeat(B, 1) # * tensor of B, L
+        
+        self.model.eval() 
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                input_ids,
+                point_clouds=point_clouds.to(torch.bfloat16),
+                do_sample= True if self.temperature > 0.0 else False,
+                temperature= self.temperature if self.temperature > 0.0 else None,
+                top_k=self.top_k,
+                max_length=self.max_length,
+                top_p=self.top_p,
+                num_beams=self.num_beams,
+                stopping_criteria=[self.stopping_criteria]) # * B, L'
+
+        input_token_len = input_ids.shape[1]
+        n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
+        if n_diff_input_output > 0:
+            print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+        outputs = self.tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)
+        outputs = [output.strip() for output in outputs]
+
         return outputs
-
-def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, evaluated_results = None):
     
-    pc_evaluator = PointCloudEvaluator(k_nn=32, device=device)
-    
-    
-    results = []
-    overall_results = {
-            'knn_dist': [],
-            'uniform_dist': [],
-            'curv_std_dist': [],
-            'chamfer_dist': [],
-            'hausdorff_dist': []
-    }
-    
-    statistic_object_ids = []
-    statistic_ori_xyz, statistic_ori_normal, statistic_adv_xyz = [], [], []
-    for i, (obj_id, ori_pc, adv_pc ) in enumerate(zip(obj_id_list, ori_pc_list, adv_pc_list)):
-        # ori_pc = ori_data['point_clouds'].to(device)
-        # adv_pc = adv_data['point_clouds'].to(device)
-        
-        # obj_ids = adv_data['object_ids']
-        
-        ori_xyz = ori_pc[..., :3]
-        ori_normal = ori_pc[..., 6:9]
-        adv_xyz = adv_pc[..., :3]
-        
-        if evaluated_results is not None:
-            if evaluated_results[i]['accuracy'] == 1:
-                    statistic_object_ids.append(obj_id)
-                    statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-                    statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device, dtype=torch.float32))
-                    statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-        else:
-            statistic_object_ids.append(obj_id)
-            statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-            statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device))
-            statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-    # print( "len(statistic_object_ids):", len(statistic_object_ids))
-    for j in range(len(statistic_ori_xyz)):
-        obj_id = statistic_object_ids[j]
-        ori_xyz = statistic_ori_xyz[j].unsqueeze(0)
-        adv_xyz = statistic_adv_xyz[j].unsqueeze(0)
-        ori_normal = statistic_ori_normal[j].unsqueeze(0)
-        pc_result = pc_evaluator.evaluate(ori_xyz, adv_xyz, ori_normal)
-        
-        pc_result =  {metric: float(value.cpu().numpy()) for metric, value in pc_result.items()}
-        for metrics, values in pc_result.items():
-            overall_results[metrics].append( values )
-
-        pc_result['obj_id'] = obj_id
-        results.append(pc_result)
-        
-    average_results = {}
-    for metrics, values in overall_results.items():
-        average_results[metrics] = float(np.mean((values)))
-        
-    print(f"Average knn_dist: {average_results['knn_dist']}")
-    print(f"Average uniform_dist: {average_results['uniform_dist']}")
-    print(f"Average curv_std_dist: {average_results['curv_std_dist']}")
-    print(f"Average chamfer_dist: {average_results['chamfer_dist']}")
-    print(f"Average hausdorff_dist: {average_results['hausdorff_dist']}")
-    
-    # * save the results
-    save_results = {
-        'overall_results': average_results,
-        'results': results
-    }
-    os.makedirs(output_eval_dir, exist_ok=True)
-    with open(os.path.join(output_eval_dir, 'pc_evaluation_results_recall_in_training.json'), 'w') as fp:
-        json.dump(save_results, fp, indent=4)
-
-
-
 def main(args):
     
     #lr = args.lr
@@ -295,8 +275,9 @@ def main(args):
     #pointnum = args.pointnum
     #prompt_index = args.prompt_index
     #batch_size = args.batch_size
-    
-    if dataset_type == 'Objaverse' and  not os.path.exists(args.adv_anno_path):
+    # Handle Objaverse annotation files
+    adv_annos = None
+    if dataset_type == 'Objaverse' and not os.path.exists(args.adv_anno_path):
         ori_annos = json.load(open(args.ori_anno_path, "r"))
         tgt_annos = json.load(open(args.tgt_anno_path, "r"))
         adv_annos = []
@@ -308,11 +289,14 @@ def main(args):
             json.dump(adv_annos, f, indent=4)
     elif dataset_type == 'Objaverse' and os.path.exists(args.adv_anno_path):
         adv_annos = json.load(open(args.adv_anno_path, "r"))
+
+    output_file = f"{dataset_type}_classification_prompt_{args.prompt_index}_evaluated_{args.gpt_type}_in_training.json"
+    output_eval_file = os.path.join(args.output_eval_path, output_file)
     
     success_rate = 0.0
-    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index] }
+    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index]}
     eval_results = []
-    ori_pc_list, obj_id_list = [], []
+    attack_id_list, attack_pc_list = [], []
     adv_pc_file_name_list = []
     adv_pc_list, adv_label_list = [], []
     
@@ -324,64 +308,56 @@ def main(args):
         eval_data = json.load(open(output_eval_file, "r"))
         eval_results = eval_data.get('eval_results', [])
         success_rate = eval_data.get('ASR', 0.0)
+        for eval_result in eval_results:
+            attack_id_list.append(eval_result['object_id']) # * use index as object id
         if dataset_type == 'ModelNet':
             adv_pc_list, adv_label_list = pickle.load(open(output_pc_path, "rb"))
-            obj_id_list = list(range(len(adv_pc_list))) # * use index as object id
             total_ori_pc_list, _ = pickle.load(open(args.ori_data_path, "rb")) 
-            ori_pc_list = total_ori_pc_list[:len(adv_pc_list)] # * ensure the length of ori_pc_list is the same as adv_pc_list
+            attack_pc_list = [total_ori_pc_list[int(attack_id.split('_')[0])] for attack_id in attack_id_list]
         elif dataset_type == 'Objaverse':
             for i, file in enumerate(os.listdir(output_pc_path)):
                 if file.endswith('.npy'):
-                    obj_id_list.append(file.split(f'_{args.pointnum}.npy')[0])
                     adv_pc_file_name_list.append(file)
                     adv_pc = np.load(os.path.join(output_pc_path, file))
-                    # print( adv_pc.dtype, adv_pc.shape )
                     adv_pc_list.append(adv_pc)
                     assert adv_annos[i]['conversations'][1]['from'] == 'gpt'
                     adv_label = adv_annos[i]['conversations'][1]['value']
                     adv_label_list.append(adv_label)
                     
-                    ori_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
-                    ori_pc = np.load(os.path.join(args.ori_data_path, ori_pc_name))
-                    ori_pc_list.append(ori_pc)
+                    attack_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
+                    attack_pc = np.load(os.path.join(args.ori_data_path, attack_pc_name))
+                    attack_pc_list.append(attack_pc)
             
         
         assert len(adv_pc_list) == len(eval_results), "The length of adversarial point clouds and evaluation results should be the same."
         print(f"Loaded {len(eval_results)} evaluation results")
-        
-        if args.redirect_normal and len(adv_pc_list) != 0 and len(ori_pc_list) != 0:
-            ori_pc_list = [redirect_normals(pc) for pc in ori_pc_list]
-            adv_pc_list = [redirect_normals(pc) for pc in adv_pc_list]
-    
-    
+ 
+
     if args.wandb:
         run = wandb.init(project=args.wandb_project_name, 
                          name=args.wandb_run_name, 
                          reinit=True)
         
-    model, vis_processors, txt_processors = load_model_and_preprocess(name=args.model_name, model_type=args.model_type, is_eval=True, device=device)
-    # model = model.to(torch.bfloat16)
-    for param in model.parameters():
-        param.requires_grad = True
-        # param = param.to(torch.bfloat16) # * convert model to bfloat16
-
     ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, anno_path= args.ori_anno_path,
                                  normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
-                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
-                               pts_processor=vis_processors['eval'], text_processor = txt_processors['eval']) # * defalut config
+                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal ) # * defalut config
     ori_dataloader = get_dataloader(ori_dataset, args.batch_size, args.shuffle, args.num_workers)
+    
     tgt_dataset = load_dataset( dataset_type = dataset_type, data_path= args.tgt_data_path, anno_path= args.tgt_anno_path,
-                                 normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
-                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
-                               pts_processor=vis_processors['eval'], text_processor = txt_processors['eval']) # * defalut config
+                                normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
+                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal ) # * defalut config
     tgt_dataloader = get_dataloader(tgt_dataset, args.batch_size, args.shuffle, args.num_workers)
 
 
 
-    adv_func = LLMLoss( model, is_targeted= is_targeted )
+    model, tokenizer, conv = init_model(args)
+    adv_func = LLMLoss(model, tokenizer, conv, args.prompt_index, is_targeted=args.is_targeted ) 
     
-    genetrate = ModelGeneration( model, args )
-    eval_func = GPTEvaluation( genetrate, args.gpt_type, is_targeted= is_targeted )
+    genetration = ModelGeneration( model, tokenizer, conv, args )
+    eval_func = GPTEvaluation( genetration, args.gpt_type, is_targeted=args.is_targeted )
+    
+    
+
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
                                central_num=args.central_num, total_central_num=args.total_central_num,
@@ -394,20 +370,18 @@ def main(args):
     
     
     
-    eval_attack_num = len(eval_results)
     success_nums = 0
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
     try:
+    # if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
-            if i * args.batch_size < eval_attack_num:
-                print(f"Skip {i}th batch, since it has been evaluated.")
-                continue
             ori_id = ori_data_dict['object_id']
-            tgt_id = tgt_data_dict['object_id']
+            tgt_id = tgt_data_dict['object_id']   
             ori_pc = ori_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
-            # tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
+            ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            # tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32 
             if is_targeted:
                 if dataset_type == 'ModelNet':
                     tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
@@ -418,45 +392,73 @@ def main(args):
                     tgt_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
                 else:
                     tgt_labels = ori_data_dict['label']
+
                 
-            adv_pc, success_num, eval_result = HiT_attacker.attack( ori_pc, tgt_labels )
-            success_nums += success_num
-            for j in range(ori_pc.shape[0]):
-                if i * args.batch_size + j < eval_attack_num:
-                    continue
+            attack_ids, attack_pcs = [], []
+            attack_ori_labels, attack_tgt_labels = [], []     
+            for j in range(len(ori_id)):
                 if is_targeted:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                    attack_id = f"{ori_id[j]}_{tgt_id[j]}"  
                 else:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
+                    attack_id = f"{ori_id[j]}"  
+
+                if attack_id not in attack_id_list: 
+                    attack_ids.append(attack_id)
+                    attack_pcs.append(ori_pc[j])
+                    attack_ori_labels.append(ori_labels[j])
+                    attack_tgt_labels.append(tgt_labels[j])
+            if len(attack_ids) == 0:
+                print(f"Skip {i}th batch, since all the objects have been evaluated.")
+                continue    
+            
+                
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            predict_accuracies, evaluation_results = eval_func(attack_pcs, attack_ori_labels)
+            
+            if not is_targeted:
+                predict_accuracies = 1 - predict_accuracies
+            
+            if predict_accuracies.sum() == 0:
+                print(evaluation_results)
+                print(f"Skip {i}th batch, since all data are negative samples.")
+                continue
+           
+            # print(attack_ids)
+            # print(predict_accuracies)
+            # Only keep attack_ids where predict_accuracies == 1
+            attack_ids = [attack_ids[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            # print(attack_ids)
+            attack_pcs =  [attack_pcs[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            
+            attack_ori_labels = [attack_ori_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            attack_tgt_labels = [attack_tgt_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            adv_pcs, success_num, eval_result = HiT_attacker.attack( attack_pcs, attack_tgt_labels )
+            success_nums += success_num
+
+            for j, (attack_id, attack_ori_label) in enumerate(zip(attack_ids, attack_ori_labels)):
+                eval_result[j].update({'object_id': attack_id} )
+                if is_targeted:
+                    eval_result[j].update({'original_label': attack_ori_label} )
             eval_results.extend(eval_result)
             
-            ori_pc = ori_pc.float().cpu().numpy()
-            if is_targeted:
-                saved_label = tgt_data_dict['label']
-                for b, (oid, op, tid, ap, adv_label) in enumerate( zip(ori_id, ori_pc, tgt_id, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}_{tid}")
-                        adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
-            else:
-                saved_label = ori_data_dict['label']
-                for b, (oid, op, ap, adv_label) in enumerate( zip(ori_id, ori_pc, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}")
-                        adv_pc_file_name_list.append(f"{oid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
+            attack_pcs = attack_pcs.float().cpu().numpy()
+            
+            for attack_id, attack_pc, adv_pc, attack_tgt_label in  zip(attack_ids, attack_pcs, adv_pcs, attack_tgt_labels):
+                attack_id_list.append(attack_id)
+                if dataset_type == 'Objaverse':
+                    adv_pc_file_name_list.append(f"{attack_id}_{args.pointnum}.npy")
+                attack_pc_list.append(attack_pc)
+                adv_pc_list.append(adv_pc)
+                adv_label_list.append(attack_tgt_label)
+            
+            # break     
+
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     
-    success_rate += success_nums / len(ori_dataset)       
+    success_rate = success_nums / len(attack_pc_list)
     print("attack success rate: ", success_rate)
     saved_results['ASR'] = success_rate
     saved_results['eval_results'] = eval_results
@@ -480,9 +482,8 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, args.output_eval_path, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results)
         print("Point cloud evaluation finished.")
-    
  
 
 if __name__ == '__main__':
@@ -491,9 +492,7 @@ if __name__ == '__main__':
     
     # model
     parser.add_argument("--model_name", type=str, \
-        default="gpt4point_opt") 
-    parser.add_argument("--model_type", type=str, \
-        default="gpt4point_opt2.7b") 
+        default="RunsenXu/PointLLM_7B_v1.2") 
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--num_beams", type=int, default=1)

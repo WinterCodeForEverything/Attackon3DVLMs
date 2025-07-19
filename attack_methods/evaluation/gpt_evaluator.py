@@ -8,14 +8,50 @@ random.seed(0)
 
 
 
-gpt4_open_free_from_cls_prompt = """Analyze two sentences and determine if they're referring to the same general object or concept, focusing on the type of object, not attributes such as color, size, or shape. Respond with 'T' if they refer to the same thing and 'F' if not. Also, provide a brief rationale (no more than 20 words) for your judgment.
-Example:
-Input: 1. Spiral staircase that goes from a ground floor. 2. This is a 3D model of wooden stairs in light brown
-Output: T#Both refer to a staircase.
+# gpt4_open_free_from_cls_prompt = """Analyze two sentences and determine if they're referring to the same general object or concept, focusing on the category of object, not attributes such as color, size, or shape, neight cartoon or realistic. Respond with 'T' if they refer to the same thing and 'F' if not. Also, provide a brief rationale (no more than 20 words) for your judgment.
+# Example 1:
+# Input: 1. Spiral staircase that goes from a ground floor. 2. This is a 3D model of wooden stairs in light brown
+# Output: T#Both refer to a staircase.
+
+# Example 2:
+# Input: 1. Animation of a penguin with a crown. 2. a penguin wearing a hat
+# Output: T#Both refer to a penguin.
+
+# Example 3:
+# Input: 1. a toy house with cubical body and triangular roof and open door". 2. a small house with a roof, featuring a bird, a plane, and a birdhouse
+
+# Now, analyze the following:
+# Input: 1. {ground_truth} 2. {model_output}
+# Output: """ # * about 230 input tokens
+
+gpt4_open_free_from_cls_prompt = """You are given two sentences. Your task is to determine whether they refer to the same general **category** of object or concept — regardless of color, material, size, realism, or artistic style (e.g. cartoon vs realistic). Focus purely on the object's type or category.
+
+Respond with:
+- 'T' if both refer to the same object category.
+- 'F' if they refer to different categories.
+
+Also include a **brief reason (no more than 20 words)** after a '#' symbol.
+
+### Examples:
+
+Example 1:
+Input: 1. Spiral staircase that goes from a ground floor. 2. This is a 3D model of wooden stairs in light brown  
+Output: T#Both are staircases.
+
+Example 2:
+Input: 1. Animation of a penguin with a crown. 2. a penguin wearing a hat  
+Output: T#Both describe penguins.
+
+Example 3:
+Input: 1. a red car. 2. a white boat.  
+Output: F#Car and boat are different vehicle types.
 
 Now, analyze the following:
-Input: 1. {ground_truth} 2. {model_output}
-Output: """ # * about 230 input tokens
+Input: 1. {ground_truth} 2. {model_output}  
+Output:"""
+
+
+
 
 class OpenAIGPT():
     def __init__(self, model="gpt-40-mini", temperature=1, top_p=1, max_tokens=2048, **kwargs) -> None:
@@ -128,15 +164,22 @@ class GPTEvaluation(torch.nn.Module):
     def parse_gpt_response_evaluate(self, gpt_response):
         gpt_response = gpt_response.strip()
 
-        cls_result = gpt_response[0].upper()
-        reason = gpt_response[2:] if len(gpt_response) > 2 else ""
+        # Attempt to split using the '#' delimiter
+        if '#' in gpt_response:
+            parts = gpt_response.split('#', 1)
+            cls_result = parts[0].strip().upper()
+            reason = parts[1].strip()
+        else:
+            # Fall back to first character as label and rest as reason
+            cls_result = gpt_response[0].strip().upper() if gpt_response else ""
+            reason = gpt_response[1:].strip() if len(gpt_response) > 1 else ""
 
+        # Validate the classification result
         if cls_result not in ['T', 'F']:
             self.invalid_responses += 1
             return 0, "INVALID", gpt_response
 
         accuracy = 1 if cls_result == 'T' else 0
-
         return accuracy, cls_result, reason
 
 

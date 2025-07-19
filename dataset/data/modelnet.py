@@ -24,6 +24,9 @@ class ModelNet(Dataset):
         self.use_normal = use_normal
         self.pts_processor = pts_processor
         self.text_processor = text_processor
+        
+        # print("self.has_color:", self.has_color)
+        # print("self.has_normal:", self.has_normal)
 
         with open(data_path, 'rb') as f:
             self.list_of_points, self.list_of_labels = pickle.load(f)
@@ -109,6 +112,7 @@ class ModelNet(Dataset):
     
 
     def __getitem__(self, index):
+        # print(f"Loading point cloud {index}...")
         point_cloud, label = self.list_of_points[index], self.list_of_labels[index]
         
         point_cloud = self._points_preprocess(point_cloud)

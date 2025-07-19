@@ -268,15 +268,16 @@ def main(args):
     
     #lr = args.lr
     #budget = args.budget
+    is_targeted = args.is_targeted 
     dataset_type = args.dataset_type
-    is_targeted = args.is_targeted
     assert dataset_type in ['ModelNet', 'Objaverse'], f"Unsupported dataset type: {dataset_type}"
     output_pc_path = args.output_pc_path
     #pointnum = args.pointnum
     #prompt_index = args.prompt_index
     #batch_size = args.batch_size
-    
-    if dataset_type == 'Objaverse' and  not os.path.exists(args.adv_anno_path):
+    # Handle Objaverse annotation files
+    adv_annos = None
+    if dataset_type == 'Objaverse' and not os.path.exists(args.adv_anno_path):
         ori_annos = json.load(open(args.ori_anno_path, "r"))
         tgt_annos = json.load(open(args.tgt_anno_path, "r"))
         adv_annos = []
@@ -288,12 +289,14 @@ def main(args):
             json.dump(adv_annos, f, indent=4)
     elif dataset_type == 'Objaverse' and os.path.exists(args.adv_anno_path):
         adv_annos = json.load(open(args.adv_anno_path, "r"))
+
+    output_file = f"{dataset_type}_classification_prompt_{args.prompt_index}_evaluated_{args.gpt_type}_in_training.json"
+    output_eval_file = os.path.join(args.output_eval_path, output_file)
     
     success_rate = 0.0
-    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index],
-                     "saved_pc_path": output_pc_path }
+    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index]}
     eval_results = []
-    ori_pc_list, obj_id_list = [], []
+    attack_id_list, attack_pc_list = [], []
     adv_pc_file_name_list = []
     adv_pc_list, adv_label_list = [], []
     
@@ -305,36 +308,31 @@ def main(args):
         eval_data = json.load(open(output_eval_file, "r"))
         eval_results = eval_data.get('eval_results', [])
         success_rate = eval_data.get('ASR', 0.0)
+        for eval_result in eval_results:
+            attack_id_list.append(eval_result['object_id']) # * use index as object id
         if dataset_type == 'ModelNet':
             adv_pc_list, adv_label_list = pickle.load(open(output_pc_path, "rb"))
-            obj_id_list = list(range(len(adv_pc_list))) # * use index as object id
             total_ori_pc_list, _ = pickle.load(open(args.ori_data_path, "rb")) 
-            ori_pc_list = total_ori_pc_list[:len(adv_pc_list)] # * ensure the length of ori_pc_list is the same as adv_pc_list
+            attack_pc_list = [total_ori_pc_list[int(attack_id.split('_')[0])] for attack_id in attack_id_list]
         elif dataset_type == 'Objaverse':
             for i, file in enumerate(os.listdir(output_pc_path)):
                 if file.endswith('.npy'):
-                    obj_id_list.append(file.split(f'_{args.pointnum}.npy')[0])
                     adv_pc_file_name_list.append(file)
                     adv_pc = np.load(os.path.join(output_pc_path, file))
-                    # print( adv_pc.dtype, adv_pc.shape )
                     adv_pc_list.append(adv_pc)
                     assert adv_annos[i]['conversations'][1]['from'] == 'gpt'
                     adv_label = adv_annos[i]['conversations'][1]['value']
                     adv_label_list.append(adv_label)
                     
-                    ori_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
-                    ori_pc = np.load(os.path.join(args.ori_data_path, ori_pc_name))
-                    ori_pc_list.append(ori_pc)
+                    attack_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
+                    attack_pc = np.load(os.path.join(args.ori_data_path, attack_pc_name))
+                    attack_pc_list.append(attack_pc)
             
         
         assert len(adv_pc_list) == len(eval_results), "The length of adversarial point clouds and evaluation results should be the same."
         print(f"Loaded {len(eval_results)} evaluation results")
-        
-        if args.redirect_normal and len(adv_pc_list) != 0 and len(ori_pc_list) != 0:
-            ori_pc_list = [redirect_normals(pc) for pc in ori_pc_list]
-            adv_pc_list = [redirect_normals(pc) for pc in adv_pc_list]
-    
-    
+ 
+
     if args.wandb:
         run = wandb.init(project=args.wandb_project_name, 
                          name=args.wandb_run_name, 
@@ -372,20 +370,18 @@ def main(args):
     
     
     
-    eval_attack_num = len(eval_results)
     success_nums = 0
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
     try:
+    # if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
-            if i * args.batch_size < eval_attack_num:
-                print(f"Skip {i}th batch, since it has been evaluated.")
-                continue
             ori_id = ori_data_dict['object_id']
-            tgt_id = tgt_data_dict['object_id']
-            ori_pc = ori_data_dict['point_cloud'].to(device, dtype= model.dtype) 
-            tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype=  model.dtype) 
+            tgt_id = tgt_data_dict['object_id']   
+            ori_pc = ori_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
+            ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            # tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32 
             if is_targeted:
                 if dataset_type == 'ModelNet':
                     tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
@@ -398,46 +394,71 @@ def main(args):
                     tgt_labels = ori_data_dict['label']
 
                 
-            adv_pc, success_num, eval_result = HiT_attacker.attack( ori_pc, tgt_labels )
-            success_nums += success_num
-            for j in range(ori_pc.shape[0]):
-                if i * args.batch_size + j < eval_attack_num:
-                    continue
+            attack_ids, attack_pcs = [], []
+            attack_ori_labels, attack_tgt_labels = [], []     
+            for j in range(len(ori_id)):
                 if is_targeted:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                    attack_id = f"{ori_id[j]}_{tgt_id[j]}"  
                 else:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
+                    attack_id = f"{ori_id[j]}"  
+
+                if attack_id not in attack_id_list: 
+                    attack_ids.append(attack_id)
+                    attack_pcs.append(ori_pc[j])
+                    attack_ori_labels.append(ori_labels[j])
+                    attack_tgt_labels.append(tgt_labels[j])
+            if len(attack_ids) == 0:
+                print(f"Skip {i}th batch, since all the objects have been evaluated.")
+                continue    
+            
+                
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            predict_accuracies, evaluation_results = eval_func(attack_pcs, attack_ori_labels)
+            
+            if not is_targeted:
+                predict_accuracies = 1 - predict_accuracies
+            
+            if predict_accuracies.sum() == 0:
+                print(evaluation_results)
+                print(f"Skip {i}th batch, since all data are negative samples.")
+                continue
+           
+            # print(attack_ids)
+            # print(predict_accuracies)
+            # Only keep attack_ids where predict_accuracies == 1
+            attack_ids = [attack_ids[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            # print(attack_ids)
+            attack_pcs =  [attack_pcs[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            
+            attack_ori_labels = [attack_ori_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            attack_tgt_labels = [attack_tgt_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            adv_pcs, success_num, eval_result = HiT_attacker.attack( attack_pcs, attack_tgt_labels )
+            success_nums += success_num
+
+            for j, (attack_id, attack_ori_label) in enumerate(zip(attack_ids, attack_ori_labels)):
+                eval_result[j].update({'object_id': attack_id} )
+                if is_targeted:
+                    eval_result[j].update({'original_label': attack_ori_label} )
             eval_results.extend(eval_result)
             
-            ori_pc = ori_pc.float().cpu().numpy()
-            if is_targeted:
-                saved_label = tgt_data_dict['label']
-                for b, (oid, op, tid, ap, adv_label) in enumerate( zip(ori_id, ori_pc, tgt_id, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}_{tid}")
-                        adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
-            else:
-                saved_label = ori_data_dict['label']
-                for b, (oid, op, ap, adv_label) in enumerate( zip(ori_id, ori_pc, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}")
-                        adv_pc_file_name_list.append(f"{oid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
-                
+            attack_pcs = attack_pcs.float().cpu().numpy()
+            
+            for attack_id, attack_pc, adv_pc, attack_tgt_label in  zip(attack_ids, attack_pcs, adv_pcs, attack_tgt_labels):
+                attack_id_list.append(attack_id)
+                if dataset_type == 'Objaverse':
+                    adv_pc_file_name_list.append(f"{attack_id}_{args.pointnum}.npy")
+                attack_pc_list.append(attack_pc)
+                adv_pc_list.append(adv_pc)
+                adv_label_list.append(attack_tgt_label)
+            
+            # break     
 
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     
-    success_rate += success_nums / len(ori_dataset)       
+    success_rate = success_nums / len(attack_pc_list)
     print("attack success rate: ", success_rate)
     saved_results['ASR'] = success_rate
     saved_results['eval_results'] = eval_results
@@ -461,7 +482,7 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, args.output_eval_path, device, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results)
         print("Point cloud evaluation finished.")
  
 

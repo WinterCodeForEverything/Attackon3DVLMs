@@ -1,2 +1,2 @@
-python transfer_dat_to_xyz.py --input_pc_file /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_pointllm_tgt_8192pts.dat \
-                            --output_pc_path /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_pointllm_tgt_8192pts_xyz
+python transfer_dat_to_xyz.py --input_pc_file /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_ori_8192pts_fps.dat  \
+                            --output_pc_path /mnt/ssd/liuchao/Attackon3DVLMs/modelnet40_ori_8192pts_fps_xyz
