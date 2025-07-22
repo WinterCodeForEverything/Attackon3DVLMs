@@ -16,7 +16,7 @@ import json
 
 from dataset.data.modelnet import ModelNet
 from dataset.data.objaverse import ObjaverseDataset
-from dataset.data.utils import compute_normals, redirect_normals
+# from dataset.data.utils import compute_normals, redirect_normals
 
 
 from victim_models.gpt4point.models import load_model_and_preprocess
@@ -27,7 +27,7 @@ from victim_models.pointllm.model import PointLLMLlamaForCausalLM
 from attack_methods.evaluation.loss_module import GPT4PointCaptionLoss, PointLLMCaptionLoss
 
 from attack_methods.evaluation.model_generator import PointLLMGenerator, GPT4PointGenerator
-from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
+from attack_methods.evaluation.gpt_evaluator import GPTEvaluation, GPTObjectCaptioningEvaluator
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
 from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
@@ -151,6 +151,7 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
     
 def main(args):
     
+    valid_state = 1
     #lr = args.lr
     #budget = args.budget
     model_name = args.model_name
@@ -161,6 +162,7 @@ def main(args):
     output_pc_path = args.output_pc_path
     device = args.device
     dtype = getattr(torch, args.dtype)
+    task_type = args.task_type
     #pointnum = args.pointnum
     #prompt_index = args.prompt_index
     #batch_size = args.batch_size
@@ -185,6 +187,9 @@ def main(args):
     adv_pc_file_name_list = []
     adv_pc_list, adv_label_list = [], []
     
+    if task_type == 'captioning':
+        captioning_average_score = 0.0
+    
     output_file = f"{dataset_type}_classification_prompt_{args.prompt_index}_evaluated_{args.gpt_type}_in_training.json"
     output_eval_file = os.path.join(args.output_eval_path, output_file )
     if not os.path.exists(args.output_eval_path):
@@ -193,6 +198,8 @@ def main(args):
         eval_data = json.load(open(output_eval_file, "r"))
         eval_results = eval_data.get('eval_results', [])
         success_rate = eval_data.get('ASR', 0.0)
+        if task_type == 'captioning':
+            captioning_average_score = eval_data.get('captioning_average_score', 0.0)
         for eval_result in eval_results:
             attack_id_list.append(eval_result['object_id']) # * use index as object id
         if dataset_type == 'ModelNet':
@@ -235,9 +242,12 @@ def main(args):
         adv_func = PointLLMCaptionLoss(model, tokenizer, conv, is_targeted=is_targeted ) 
         # generator = PointLLMGenerator(model=model, tokenizer=tokenizer, conv=conv, llm_args=args)
         generator = PointLLMGenerator( model, tokenizer, conv, args )
-        
-    eval_func = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
     
+    if task_type == 'classification':
+        eval_func = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+    elif task_type == 'captioning':
+        eval_func = GPTObjectCaptioningEvaluator( generator, args.gpt_type, success_score_threshold= args.success_score_threshold, is_targeted=is_targeted )
+
 
         
     ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, anno_path= args.ori_anno_path,
@@ -269,6 +279,7 @@ def main(args):
     
     
     success_nums = success_rate * len(attack_pc_list)
+    captioning_total_score = captioning_average_score * len(attack_pc_list)
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
@@ -334,6 +345,10 @@ def main(args):
             attack_pcs = torch.stack(attack_pcs, dim=0)
             adv_pcs, success_num, eval_result = HiT_attacker.attack( attack_pcs, attack_tgt_labels )
             success_nums += success_num
+            
+            if task_type == 'captioning':
+                # print(eval_result['gpt_score'])
+                captioning_total_score += sum([eval['gpt_score'] for eval in eval_result])
 
             for j, (attack_id, attack_ori_label) in enumerate(zip(attack_ids, attack_ori_labels)):
                 eval_result[j].update({'object_id': attack_id} )
@@ -354,12 +369,15 @@ def main(args):
             break
             
     # except Exception as e:
+    #     valid_state = 0
     #     print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
-   
+    
     saved_results['attack_pc_number'] = len(attack_pc_list)
-    success_rate = success_nums / len(attack_pc_list)
+    success_rate = success_nums / len(attack_pc_list) if len(attack_pc_list) > 0 else 0.0
     print("attack success rate: ", success_rate) 
     saved_results['ASR'] = success_rate
+    if task_type == 'captioning':
+        saved_results['captioning_average_score'] = captioning_total_score / len(attack_pc_list) if len(attack_pc_list) > 0 else 0.0
     saved_results['eval_results'] = eval_results
     
     # * Save evaluation results
@@ -383,6 +401,8 @@ def main(args):
         print("Starting point cloud evaluation...")
         start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
+        
+    return valid_state
     
  
 
@@ -433,6 +453,8 @@ if __name__ == '__main__':
     # parser.add_argument("--steps", type=int, default=300)
     
     #evaluate
+    parser.add_argument("--task_type",  default="classification", choices=["classification", "captioning"], help="Task type for evaluation." )
+    parser.add_argument("--success_score_threshold", type=int, default=75, help="Success score threshold for captioning task.")
     parser.add_argument("--start_pc_eval",  action="store_true", default=False)
     parser.add_argument("--gpt_type", type=str, default="gpt-4o-mini", choices=[ "gpt-4.1-mini", "gpt-4o-mini"], help="Type of the model used to evaluate.")
     parser.add_argument("--output_eval_path", type=str, default='./eval_results', help="Path to save the evaluation results.")
@@ -467,6 +489,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    main(args)
+    valid_state = 0
+    while valid_state == 0:
+        valid_state = main(args)
     
     

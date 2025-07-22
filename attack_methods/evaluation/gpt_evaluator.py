@@ -4,7 +4,7 @@ import os
 import openai
 import random
 random.seed(0)
-# import re
+import re
 
 
 
@@ -50,20 +50,40 @@ Now, analyze the following:
 Input: 1. {ground_truth} 2. {model_output}  
 Output:"""
 
-gpt4_object_captioning_prompt = """Evaluate a model-generated caption against a human-generated caption (ground truth) for a 3D model. Identify the aspects mentioned in the human caption and calculate the percentage of these aspects correctly mentioned or partially matched in the model caption. Score from 0 to 100, where each aspect contributes equally to the score. Consider similar concepts for partial score.
+# gpt4_object_captioning_prompt = """Evaluate a model-generated caption against a human-generated caption (ground truth) for a 3D model. Identify the aspects mentioned in the human caption and calculate the percentage of these aspects correctly mentioned or partially matched in the model caption. Score from 0 to 100, where each aspect contributes equally to the score. Consider similar concepts for partial score.
 
-Provide your score (0-100) and a short justification (less than 15 words) in the format of 'score#reason'
+# Provide your score (0-100) and a short justification (less than 15 words) in the format of 'score#reason'
+
+# Example:
+# Human: A white brown skeleton
+# Model: This is a 3D model of a small, cartoon-like robot. It has a spherical body and is covered in a layer of white dust.
+# Output: 50#mention white; skeleton and robot have similar appearence.
+
+# Now score the following:
+# Human: {ground_truth}
+# Model: {model_output}
+# Output: """
+
+gpt4_object_captioning_prompt = """You are evaluating the alignment between a model-generated caption and a human-written ground truth caption for a 3D object.
+
+1. Identify distinct descriptive aspects (e.g., color, material, shape, function) mentioned in the human caption.
+2. Compare them to the model's caption. If a model captures an aspect exactly, give full credit. If it partially matches (e.g., similar concept or synonym), give partial credit.
+3. Compute a final score from 0 to 100 based on the proportion of correctly or partially matched aspects.
+4. Return your answer **in exactly one line** using the format: <score>#<short reason>
+
+The reason should be concise (≤15 words), summarizing why that score was assigned.
+
+Only output one line with no extra explanation.
 
 Example:
-Human: A white brown skeleton
-Model: This is a 3D model of a small, cartoon-like robot. It has a spherical body and is covered in a layer of white dust.
-Output: 50#mention white; skeleton and robot have similar appearence.
+Human: A white brown skeleton  
+Model: This is a 3D model of a small, cartoon-like robot. It has a spherical body and is covered in a layer of white dust.  
+Output: 50#mention white; skeleton and robot have similar appearance.
 
 Now score the following:
-Human: {ground_truth}
-Model: {model_output}
-Output: """
-
+Human: {ground_truth}  
+Model: {model_output}  
+Output:"""
 
 
 
@@ -197,3 +217,107 @@ class GPTEvaluation(torch.nn.Module):
         return accuracy, cls_result, reason
 
 
+class GPTObjectCaptioningEvaluator(torch.nn.Module):
+    def __init__(self, Generation, gpt_type, success_score_threshold, is_targeted=True):
+        super(GPTObjectCaptioningEvaluator, self).__init__()
+        self.Generation = Generation
+        self.gpt_type = gpt_type
+        self.success_score_threshold = success_score_threshold
+        self.is_targeted = is_targeted
+        self.gpt_prompt = gpt4_object_captioning_prompt
+        
+        self.default_chat_parameters = {
+            "model": gpt_type,
+            "temperature": 1, 
+            "top_p": 1, 
+            "max_tokens": 2048
+        }
+
+        
+        self.openaigpt = OpenAIGPT(**self.default_chat_parameters)
+        
+    def forward( self, adv_pc, tgt_labels ):
+        
+        if adv_pc.shape[-1] > 6:
+            adv_pc = adv_pc[..., :6]
+            
+        model_outputs = self.Generation.generate(adv_pc) # * B, L'
+        
+        B = adv_pc.shape[0]
+        accuracies = np.zeros(B, dtype=np.int32)
+        results = []
+        for i in range(B):
+            result = {
+                'ground_truth': tgt_labels[i],
+                'model_output': model_outputs[i],
+                
+            }
+            gpt_score, reason = self.evaluate_result( result )
+            accuracy = 0
+            if gpt_score >= self.success_score_threshold:
+                accuracy = 1
+            if not self.is_targeted:
+                accuracy = 1 - accuracy # * for untargeted attack, we want to maximize the difference
+            accuracies[i] = accuracy
+            result.update({
+                'accuracy': accuracy,
+                'gpt_score': gpt_score,
+                'reason': reason
+            })
+            # print(result)
+            results.append(result)
+        # print(results)
+
+        return accuracies, results
+
+
+    def parse_gpt_response_evaluate(self, gpt_response ):
+        """
+        Argument:
+            gpt_response: str, index#label#short_reason
+            groud_truth: int
+        """
+
+        # * use regular expression to extract
+        pattern = r'(\d*#.*)'
+        match = re.search(pattern, gpt_response)
+
+        gpt_response = match.group(1) if match else gpt_response
+
+        gpt_response = gpt_response.strip()
+        gpt_response_list = gpt_response.split('#')
+
+        gpt_score = gpt_response_list[0]
+        reason = gpt_response_list[1] if len(gpt_response_list) > 1 else ""
+
+        try:
+            # * convert to int
+            gpt_score = int(gpt_score)
+            if gpt_score not in range(101): # * in 0-100
+                # * not valid range
+                gpt_score = -1
+        except ValueError:
+            print(f"Error: unale to parse {gpt_response}.")
+            gpt_score = -1
+
+        if gpt_score == -1:
+            reason = gpt_response
+        
+        return gpt_score, reason
+
+    def evaluate_result(self, result):
+        
+        ground_truth = result['ground_truth']
+        model_output = result['model_output']
+        messages = [{"role": "user", "content": self.gpt_prompt.format(ground_truth=ground_truth, model_output=model_output)}]
+
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False) 
+
+        # prompt_tokens = gpt_response['usage']['prompt_tokens']
+        # completion_tokens = gpt_response['usage']['completion_tokens']
+
+        gpt_response = gpt_response['choices'][0]["message"]['content']
+
+        gpt_score, reason = self.parse_gpt_response_evaluate(gpt_response) # return 0, "INVALID", gpt_response if not valid
+
+        return gpt_score, reason
