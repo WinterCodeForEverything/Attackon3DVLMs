@@ -50,6 +50,20 @@ Now, analyze the following:
 Input: 1. {ground_truth} 2. {model_output}  
 Output:"""
 
+gpt4_object_captioning_prompt = """Evaluate a model-generated caption against a human-generated caption (ground truth) for a 3D model. Identify the aspects mentioned in the human caption and calculate the percentage of these aspects correctly mentioned or partially matched in the model caption. Score from 0 to 100, where each aspect contributes equally to the score. Consider similar concepts for partial score.
+
+Provide your score (0-100) and a short justification (less than 15 words) in the format of 'score#reason'
+
+Example:
+Human: A white brown skeleton
+Model: This is a 3D model of a small, cartoon-like robot. It has a spherical body and is covered in a layer of white dust.
+Output: 50#mention white; skeleton and robot have similar appearence.
+
+Now score the following:
+Human: {ground_truth}
+Model: {model_output}
+Output: """
+
 
 
 

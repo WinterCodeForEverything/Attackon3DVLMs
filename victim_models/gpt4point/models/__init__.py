@@ -156,7 +156,7 @@ def load_model_and_preprocess(name, model_type, is_eval=False, device="cpu"):
     if device == "cpu" or device == torch.device("cpu"):
         model = model.float()
 
-    return model.to(device), pts_processors, txt_processors
+    return model.to( device=device), pts_processors, txt_processors
 
 
 class ModelZoo:

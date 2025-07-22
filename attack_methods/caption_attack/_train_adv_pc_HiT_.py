@@ -4,7 +4,6 @@ import numpy as np
 import torch
 # from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torch.nn import CrossEntropyLoss
 
 
 # from tqdm import tqdm
@@ -19,37 +18,32 @@ from dataset.data.modelnet import ModelNet
 from dataset.data.objaverse import ObjaverseDataset
 from dataset.data.utils import compute_normals, redirect_normals
 
-from victim_models.pointllm.conversation import conv_templates, SeparatorStyle
-from victim_models.pointllm.utils import disable_torch_init
-from victim_models.pointllm.model import *
-from victim_models.pointllm.model.utils import KeywordsStoppingCriteria
 
+from victim_models.gpt4point.models import load_model_and_preprocess
+from victim_models.pointllm.conversation import conv_templates
+from victim_models.pointllm.utils import disable_torch_init
+from victim_models.pointllm.model import PointLLMLlamaForCausalLM
+
+from attack_methods.evaluation.loss_module import GPT4PointCaptionLoss, PointLLMCaptionLoss
+
+from attack_methods.evaluation.model_generator import PointLLMGenerator, GPT4PointGenerator
 from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
 from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-IGNORE_INDEX = -100
 
-
-    
-PROMPT_LISTS = [
-    "What is this?",
-    "This is an object of "
-]
-
-def init_model(args):
+def init_PointLLM(model_name, dtype, device):
     # Model
     disable_torch_init()
-    model_name = os.path.expanduser(args.model_name)
+    model_name = os.path.expanduser(model_name)
 
     # * print the model_name (get the basename)
     print(f'[INFO] Model name: {os.path.basename(model_name)}')
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=torch.bfloat16).to(device)
+    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=dtype).to(device)
     model.get_model().fix_pointnet = False
     model.get_model().fix_llm = False
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
@@ -59,7 +53,7 @@ def init_model(args):
     conv = conv_templates[conv_mode].copy()
     
     #stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    qs = PROMPT_LISTS[args.prompt_index]
+    qs = "What is this?"
 
     point_backbone_config = model.get_model().point_backbone_config
     point_token_len = point_backbone_config['point_token_len']
@@ -77,7 +71,6 @@ def init_model(args):
     conv.append_message(conv.roles[0], qs)
 
     return model, tokenizer, conv
-
 
 
 def load_dataset(dataset_type, data_path, anno_path=None, normalized_pc=True,
@@ -104,180 +97,75 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return dataloader
 
-# def generate_tgt_caption(tgt_labels, prompt_index=0):
-#     tgt_captions = []
-#     for label_name in range(tgt_labels):
-#         if prompt_index == 0:
-#             tgt_caption = f"This is an object of {label_name}."
-#         elif prompt_index == 1:
-#             tgt_caption = label_name
-#         tgt_captions.append(tgt_caption)
-
-#     return tgt_captions
-
-
-class LLMLoss(torch.nn.Module):
-    def __init__(self, model, tokenizer, conv, prompt_index, is_targeted=True):
-        super(LLMLoss, self).__init__()
-        self.model = model
-        self.tokenizer = tokenizer
-        self.prompt_index = prompt_index
-        self.conv = conv
-        self.is_targeted = is_targeted
-    
-    def generate_and_mask_target(
-        self,
-        conversations
-    ):
-
-        # Tokenize conversations
-        input_ids = self.tokenizer(
-            conversations,
-            return_tensors="pt",
-            padding="longest",
-            max_length= self.tokenizer.model_max_length,
-            truncation=True,
-        ).input_ids
-        targets = input_ids.clone()
-
-        # Mask targets
-        sep = self.conv.sep + self.conv.roles[1] + ": " 
-        # print(f"sep: {sep}")
-        for conversation, target in zip(conversations, targets):
-            total_len = int(target.ne(self.tokenizer.pad_token_id).sum())
-
-            rounds = conversation.split(self.conv.sep2)
-            cur_len = 1
-            target[:cur_len] = IGNORE_INDEX
-            for i, rou in enumerate(rounds):
-                if rou == "":
-                    break
-
-                parts = rou.split(sep)
-                if len(parts) != 2: # * can handle padded tokens
-                    break
-                parts[0] += sep
-                round_len = len(self.tokenizer(rou).input_ids)
-                instruction_len = len(self.tokenizer(parts[0]).input_ids) - 2
-
-                target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-                cur_len += round_len
-            target[cur_len:] = IGNORE_INDEX # * this is necessary for padded tokens
-
-            if cur_len < self.tokenizer.model_max_length:
-                if cur_len != total_len: # * unk tokens in the dialogue will cause this.
-                    target[:] = IGNORE_INDEX
-                    print(
-                        f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                        f" (ignored)"
-                    )
-                    
-            # # Detokenize targets to text
-            # detokenized_targets = tokenizer.batch_decode(targets, skip_special_tokens=True)
-            # print(f"Detokenized targets: {detokenized_targets}")
-
-        return input_ids, targets
-
-
-    def forward(self, adv_pc, tgt_labels ):
+# class ModelGeneration(torch.nn.Module):
+#     def __init__(self, model, tokenizer, conv,  args):
+#         super(ModelGeneration, self).__init__()
+#         self.model = model
+#         # self.conv = conv
+#         self.tokenizer = tokenizer
+#         self.temperature = args.temperature
+#         self.top_k = args.top_k
+#         self.top_p = args.top_p
+#         self.num_beams = args.num_beams
+#         self.max_length = args.max_length
+#         # stopping_criteria
         
-        if adv_pc.shape[-1] > 6:
-            adv_pc = adv_pc[..., :6]
-        
-        # tgt_captions = generate_tgt_caption( tgt_labels, 1 )
-        tgt_captions = tgt_labels
-        
-        conversations = []
-        for tgt_caption in tgt_captions:
-            tgt_conv = self.conv.copy()
-            tgt_conv.append_message( self.conv.roles[1], tgt_caption )
-            conversations.append( tgt_conv.get_prompt() )
-        
-        input_caption_ids, tgt_caption_ids = self.generate_and_mask_target(
-            conversations
-        )
-        
-        outputs = self.model(
-                input_ids=input_caption_ids.to(device), 
-                point_clouds= adv_pc.to(self.model.dtype),
-                labels= tgt_caption_ids.to(device),
-                return_dict=True,
-                    )
-        if self.is_targeted:
-            loss = outputs.loss
-        else:
-            loss = -1 * outputs.loss
-        # print(f"loss: {loss}")
+#         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
 
-        return loss
-
-class ModelGeneration(torch.nn.Module):
-    def __init__(self, model, tokenizer, conv,  args):
-        super(ModelGeneration, self).__init__()
-        self.model = model
-        # self.conv = conv
-        self.tokenizer = tokenizer
-        self.temperature = args.temperature
-        self.top_k = args.top_k
-        self.top_p = args.top_p
-        self.num_beams = args.num_beams
-        self.max_length = args.max_length
-        # stopping_criteria
+#         prompt = conv.get_prompt()
+#         inputs = tokenizer([prompt])
         
-        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-
-        prompt = conv.get_prompt()
-        inputs = tokenizer([prompt])
+#         input_ids_ = torch.as_tensor(inputs.input_ids).cuda() # * tensor of 1, L
+#         self.input_ids_ = input_ids_
         
-        input_ids_ = torch.as_tensor(inputs.input_ids).cuda() # * tensor of 1, L
-        self.input_ids_ = input_ids_
-        
-        self.stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids_)
+#         self.stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids_)
         
 
         
-    def generate( self, point_clouds ):
+#     def generate( self, point_clouds ):
         
-        B = point_clouds.shape[0]
-        input_ids = self.input_ids_.repeat(B, 1) # * tensor of B, L
+#         B = point_clouds.shape[0]
+#         input_ids = self.input_ids_.repeat(B, 1) # * tensor of B, L
         
-        self.model.eval() 
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                input_ids,
-                point_clouds=point_clouds.to(torch.bfloat16),
-                do_sample= True if self.temperature > 0.0 else False,
-                temperature= self.temperature if self.temperature > 0.0 else None,
-                top_k=self.top_k,
-                max_length=self.max_length,
-                top_p=self.top_p,
-                num_beams=self.num_beams,
-                stopping_criteria=[self.stopping_criteria]) # * B, L'
+#         self.model.eval() 
+#         with torch.inference_mode():
+#             output_ids = self.model.generate(
+#                 input_ids,
+#                 point_clouds=point_clouds.to(torch.bfloat16),
+#                 do_sample= True if self.temperature > 0.0 else False,
+#                 temperature= self.temperature if self.temperature > 0.0 else None,
+#                 top_k=self.top_k,
+#                 max_length=self.max_length,
+#                 top_p=self.top_p,
+#                 num_beams=self.num_beams,
+#                 stopping_criteria=[self.stopping_criteria]) # * B, L'
 
-        input_token_len = input_ids.shape[1]
-        n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
-        if n_diff_input_output > 0:
-            print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
-        outputs = self.tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)
-        outputs = [output.strip() for output in outputs]
+#         input_token_len = input_ids.shape[1]
+#         n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
+#         if n_diff_input_output > 0:
+#             print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+#         outputs = self.tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)
+#         outputs = [output.strip() for output in outputs]
 
-        return outputs
+#         return outputs
     
 def main(args):
     
     #lr = args.lr
     #budget = args.budget
+    model_name = args.model_name
+    model_type = args.model_type
     is_targeted = args.is_targeted 
     dataset_type = args.dataset_type
     assert dataset_type in ['ModelNet', 'Objaverse'], f"Unsupported dataset type: {dataset_type}"
     output_pc_path = args.output_pc_path
+    device = args.device
+    dtype = getattr(torch, args.dtype)
     #pointnum = args.pointnum
     #prompt_index = args.prompt_index
     #batch_size = args.batch_size
-    # Handle Objaverse annotation files
-    adv_annos = None
-    if dataset_type == 'Objaverse' and not os.path.exists(args.adv_anno_path):
+    
+    if dataset_type == 'Objaverse' and  not os.path.exists(args.adv_anno_path):
         ori_annos = json.load(open(args.ori_anno_path, "r"))
         tgt_annos = json.load(open(args.tgt_anno_path, "r"))
         adv_annos = []
@@ -289,12 +177,9 @@ def main(args):
             json.dump(adv_annos, f, indent=4)
     elif dataset_type == 'Objaverse' and os.path.exists(args.adv_anno_path):
         adv_annos = json.load(open(args.adv_anno_path, "r"))
-
-    output_file = f"{dataset_type}_classification_prompt_{args.prompt_index}_evaluated_{args.gpt_type}_in_training.json"
-    output_eval_file = os.path.join(args.output_eval_path, output_file)
     
     success_rate = 0.0
-    saved_results = {"prompt": PROMPT_LISTS[args.prompt_index]}
+    saved_results = {}  #{"prompt": PROMPT_LISTS[args.prompt_index] }
     eval_results = []
     attack_id_list, attack_pc_list = [], []
     adv_pc_file_name_list = []
@@ -331,32 +216,46 @@ def main(args):
         
         assert len(adv_pc_list) == len(eval_results), "The length of adversarial point clouds and evaluation results should be the same."
         print(f"Loaded {len(eval_results)} evaluation results")
- 
+    
 
     if args.wandb:
         run = wandb.init(project=args.wandb_project_name, 
                          name=args.wandb_run_name, 
                          reinit=True)
         
+    if 'gpt4point' in model_type:
+        model, vis_processors, txt_processors = load_model_and_preprocess(name=model_name, model_type=model_type, is_eval=True, device=device)
+        for param in model.parameters():
+            # param.data = param.data.to(dtype)
+            param.requires_grad = True
+        adv_func = GPT4PointCaptionLoss(model, text_processor=txt_processors['eval'], is_targeted=is_targeted)
+        generator = GPT4PointGenerator(model=model, llm_args=args)
+    elif 'pointllm' in model_type:
+        model, tokenizer, conv = init_PointLLM( model_name, dtype, device )
+        adv_func = PointLLMCaptionLoss(model, tokenizer, conv, is_targeted=is_targeted ) 
+        # generator = PointLLMGenerator(model=model, tokenizer=tokenizer, conv=conv, llm_args=args)
+        generator = PointLLMGenerator( model, tokenizer, conv, args )
+        
+    eval_func = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+    
+
+        
     ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, anno_path= args.ori_anno_path,
                                  normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
-                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal ) # * defalut config
+                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
+                                    pts_processor= vis_processors['eval'] if 'gpt4point' in model_type else None,
+                                    text_processor=txt_processors['eval'] if 'gpt4point' in model_type else None )
     ori_dataloader = get_dataloader(ori_dataset, args.batch_size, args.shuffle, args.num_workers)
     
     tgt_dataset = load_dataset( dataset_type = dataset_type, data_path= args.tgt_data_path, anno_path= args.tgt_anno_path,
                                 normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
-                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal ) # * defalut config
+                                    redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
+                                    pts_processor= vis_processors['eval'] if 'gpt4point' in model_type else None,
+                                    text_processor=txt_processors['eval'] if 'gpt4point' in model_type else None )
     tgt_dataloader = get_dataloader(tgt_dataset, args.batch_size, args.shuffle, args.num_workers)
 
 
 
-    model, tokenizer, conv = init_model(args)
-    adv_func = LLMLoss(model, tokenizer, conv, args.prompt_index, is_targeted=args.is_targeted ) 
-    
-    genetration = ModelGeneration( model, tokenizer, conv, args )
-    eval_func = GPTEvaluation( genetration, args.gpt_type, is_targeted=args.is_targeted )
-    
-    
 
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
@@ -369,18 +268,21 @@ def main(args):
                                budget=args.budget, use_wandb = args.wandb )
     
     
-    
-    success_nums = 0
+    success_nums = success_rate * len(attack_pc_list)
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
-    try:
-    # if 1:
+    # try:
+    if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
             ori_id = ori_data_dict['object_id']
             tgt_id = tgt_data_dict['object_id']   
-            ori_pc = ori_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
-            ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            ori_pc = ori_data_dict['point_cloud'].to(device=device, dtype=dtype) # * convert to float32
+
+            if dataset_type == 'ModelNet':
+                ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            else:
+                ori_labels = ori_data_dict['label']
             # tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32 
             if is_targeted:
                 if dataset_type == 'ModelNet':
@@ -388,12 +290,8 @@ def main(args):
                 else:
                     tgt_labels = tgt_data_dict['label']
             else:
-                if dataset_type == 'ModelNet':
-                    tgt_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
-                else:
-                    tgt_labels = ori_data_dict['label']
-
-                
+                tgt_labels = ori_labels
+            
             attack_ids, attack_pcs = [], []
             attack_ori_labels, attack_tgt_labels = [], []     
             for j in range(len(ori_id)):
@@ -453,13 +351,14 @@ def main(args):
                 adv_pc_list.append(adv_pc)
                 adv_label_list.append(attack_tgt_label)
             
-            # break     
-
-    except Exception as e:
-        print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
-    
+            break
+            
+    # except Exception as e:
+    #     print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
+   
+    saved_results['attack_pc_number'] = len(attack_pc_list)
     success_rate = success_nums / len(attack_pc_list)
-    print("attack success rate: ", success_rate)
+    print("attack success rate: ", success_rate) 
     saved_results['ASR'] = success_rate
     saved_results['eval_results'] = eval_results
     
@@ -482,8 +381,9 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
+    
  
 
 if __name__ == '__main__':
@@ -493,6 +393,11 @@ if __name__ == '__main__':
     # model
     parser.add_argument("--model_name", type=str, \
         default="RunsenXu/PointLLM_7B_v1.2") 
+    parser.add_argument("--model_type", type=str, \
+        default="gpt4point_opt2.7b") 
+    parser.add_argument('--device', type=str, default='cuda', help='Device to run the model on')
+    parser.add_argument('--dtype', type=str, default='bfloat16', choices=['bfloat16', 'float16', 'float32'], help='Data type for the model')
+    
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--num_beams", type=int, default=1)

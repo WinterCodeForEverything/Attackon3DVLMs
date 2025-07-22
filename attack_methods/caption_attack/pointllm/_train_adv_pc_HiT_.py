@@ -482,7 +482,7 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
  
 

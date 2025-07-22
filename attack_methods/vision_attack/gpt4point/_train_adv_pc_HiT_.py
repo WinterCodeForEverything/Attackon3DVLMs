@@ -23,7 +23,7 @@ from dataset.data.utils import redirect_normals
 from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
-from attack_methods.evaluation.pc_evaluator.pc_evaluator import PointCloudEvaluator
+from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,12 +82,18 @@ class FeatureSimilarityLoss(torch.nn.Module):
         # Compute the embedding similarity
         embedding_sim = torch.mean(torch.sum(adv_feature * tgt_feature, dim=2), dim=1)
         
-        if self.is_targeted:
-            loss = 1 - embedding_sim 
-        else:
-            loss = embedding_sim
-        
+        # Add L2 distance loss to improve feature similarity loss
+        l2_loss = torch.mean(torch.norm(adv_feature - tgt_feature, dim=2))
+        # Combine cosine similarity loss and L2 loss
+        loss = (1 - embedding_sim) + l2_loss if self.is_targeted else embedding_sim - l2_loss
         return loss
+        
+        # if self.is_targeted:
+        #     loss = 1 - embedding_sim 
+        # else:
+        #     loss = embedding_sim
+        
+        # return loss
 
 
 class ModelGeneration(torch.nn.Module):
@@ -118,84 +124,12 @@ class ModelGeneration(torch.nn.Module):
         
         return outputs
 
-def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, evaluated_results = None):
-    
-    pc_evaluator = PointCloudEvaluator(k_nn=32, device=device)
-    
-    
-    results = []
-    overall_results = {
-            'knn_dist': [],
-            'uniform_dist': [],
-            'curv_std_dist': [],
-            'chamfer_dist': [],
-            'hausdorff_dist': []
-    }
-    
-    statistic_object_ids = []
-    statistic_ori_xyz, statistic_ori_normal, statistic_adv_xyz = [], [], []
-    for i, (obj_id, ori_pc, adv_pc ) in enumerate(zip(obj_id_list, ori_pc_list, adv_pc_list)):
-        # ori_pc = ori_data['point_clouds'].to(device)
-        # adv_pc = adv_data['point_clouds'].to(device)
-        
-        # obj_ids = adv_data['object_ids']
-        
-        ori_xyz = ori_pc[..., :3]
-        ori_normal = ori_pc[..., 6:9]
-        adv_xyz = adv_pc[..., :3]
-        
-        if evaluated_results is not None:
-            if evaluated_results[i]['accuracy'] == 1:
-                    statistic_object_ids.append(obj_id)
-                    statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-                    statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device, dtype=torch.float32))
-                    statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-        else:
-            statistic_object_ids.append(obj_id)
-            statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-            statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device))
-            statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-    # print( "len(statistic_object_ids):", len(statistic_object_ids))
-    for j in range(len(statistic_ori_xyz)):
-        obj_id = statistic_object_ids[j]
-        ori_xyz = statistic_ori_xyz[j].unsqueeze(0)
-        adv_xyz = statistic_adv_xyz[j].unsqueeze(0)
-        ori_normal = statistic_ori_normal[j].unsqueeze(0)
-        pc_result = pc_evaluator.evaluate(ori_xyz, adv_xyz, ori_normal)
-        
-        pc_result =  {metric: float(value.cpu().numpy()) for metric, value in pc_result.items()}
-        for metrics, values in pc_result.items():
-            overall_results[metrics].append( values )
-
-        pc_result['obj_id'] = obj_id
-        results.append(pc_result)
-        
-    average_results = {}
-    for metrics, values in overall_results.items():
-        average_results[metrics] = float(np.mean((values)))
-        
-    print(f"Average knn_dist: {average_results['knn_dist']}")
-    print(f"Average uniform_dist: {average_results['uniform_dist']}")
-    print(f"Average curv_std_dist: {average_results['curv_std_dist']}")
-    print(f"Average chamfer_dist: {average_results['chamfer_dist']}")
-    print(f"Average hausdorff_dist: {average_results['hausdorff_dist']}")
-    
-    # * save the results
-    save_results = {
-        'overall_results': average_results,
-        'results': results
-    }
-    os.makedirs(output_eval_dir, exist_ok=True)
-    with open(os.path.join(output_eval_dir, 'pc_evaluation_results_recall_in_training.json'), 'w') as fp:
-        json.dump(save_results, fp, indent=4)
-
-
 
 def main(args):
     
     #lr = args.lr
     #budget = args.budget
-    is_targeted = args.is_targeted
+    is_targeted = args.is_targeted 
     dataset_type = args.dataset_type
     assert dataset_type in ['ModelNet', 'Objaverse'], f"Unsupported dataset type: {dataset_type}"
     output_pc_path = args.output_pc_path
@@ -219,7 +153,7 @@ def main(args):
     success_rate = 0.0
     saved_results = {"prompt": PROMPT_LISTS[args.prompt_index] }
     eval_results = []
-    ori_pc_list, obj_id_list = [], []
+    attack_id_list, attack_pc_list = [], []
     adv_pc_file_name_list = []
     adv_pc_list, adv_label_list = [], []
     
@@ -231,34 +165,29 @@ def main(args):
         eval_data = json.load(open(output_eval_file, "r"))
         eval_results = eval_data.get('eval_results', [])
         success_rate = eval_data.get('ASR', 0.0)
+        for eval_result in eval_results:
+            attack_id_list.append(eval_result['object_id']) # * use index as object id
         if dataset_type == 'ModelNet':
             adv_pc_list, adv_label_list = pickle.load(open(output_pc_path, "rb"))
-            obj_id_list = list(range(len(adv_pc_list))) # * use index as object id
             total_ori_pc_list, _ = pickle.load(open(args.ori_data_path, "rb")) 
-            ori_pc_list = total_ori_pc_list[:len(adv_pc_list)] # * ensure the length of ori_pc_list is the same as adv_pc_list
+            attack_pc_list = [total_ori_pc_list[int(attack_id.split('_')[0])] for attack_id in attack_id_list]
         elif dataset_type == 'Objaverse':
             for i, file in enumerate(os.listdir(output_pc_path)):
                 if file.endswith('.npy'):
-                    obj_id_list.append(file.split(f'_{args.pointnum}.npy')[0])
                     adv_pc_file_name_list.append(file)
                     adv_pc = np.load(os.path.join(output_pc_path, file))
-                    # print( adv_pc.dtype, adv_pc.shape )
                     adv_pc_list.append(adv_pc)
                     assert adv_annos[i]['conversations'][1]['from'] == 'gpt'
                     adv_label = adv_annos[i]['conversations'][1]['value']
                     adv_label_list.append(adv_label)
                     
-                    ori_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
-                    ori_pc = np.load(os.path.join(args.ori_data_path, ori_pc_name))
-                    ori_pc_list.append(ori_pc)
+                    attack_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
+                    attack_pc = np.load(os.path.join(args.ori_data_path, attack_pc_name))
+                    attack_pc_list.append(attack_pc)
             
         
         assert len(adv_pc_list) == len(eval_results), "The length of adversarial point clouds and evaluation results should be the same."
         print(f"Loaded {len(eval_results)} evaluation results")
-        
-        if args.redirect_normal and len(adv_pc_list) != 0 and len(ori_pc_list) != 0:
-            ori_pc_list = [redirect_normals(pc) for pc in ori_pc_list]
-            adv_pc_list = [redirect_normals(pc) for pc in adv_pc_list]
     
     
     if args.wandb:
@@ -287,10 +216,10 @@ def main(args):
 
     pc_encoder = model.get_pc_encoder_qformer()
 
-    adv_func = FeatureSimilarityLoss(pc_encoder)
+    adv_func = FeatureSimilarityLoss( pc_encoder, is_targeted=is_targeted )
     
-    genetrate = ModelGeneration( model, args )
-    eval_func = GPTEvaluation( genetrate, args.gpt_type, is_targeted=is_targeted)
+    genetrator = ModelGeneration( model, args )
+    eval_func = GPTEvaluation( genetrator, args.gpt_type, is_targeted=is_targeted)
 
     HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
                                central_num=args.central_num, total_central_num=args.total_central_num,
@@ -303,37 +232,36 @@ def main(args):
     
     
     
-    eval_attack_num = len(eval_results)
-    success_nums = 0
+    success_nums = success_rate * len(attack_pc_list)
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
     try:
+    # if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
-            if i * args.batch_size < eval_attack_num:
-                print(f"Skip {i}th batch, since it has been evaluated.")
-                continue
             ori_id = ori_data_dict['object_id']
-            tgt_id = tgt_data_dict['object_id']
+            tgt_id = tgt_data_dict['object_id']   
             ori_pc = ori_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
-            tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
             
+            if dataset_type == 'ModelNet':
+                ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            else:
+                ori_labels = ori_data_dict['label']
+
             if is_targeted:
                 if dataset_type == 'ModelNet':
                     tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
                 else:
                     tgt_labels = tgt_data_dict['label']
                 with torch.no_grad():
+                    tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
                     tgt_feature = pc_encoder(tgt_pc[..., :6])
                     if torch.isnan(tgt_feature).any():
                         print(f"NaN detected in tgt_feature. Skip this sample.")
                         continue
                     tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
             else:
-                if dataset_type == 'ModelNet':
-                    tgt_labels =  [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
-                else:
-                    tgt_labels = ori_data_dict['label']
+                tgt_labels = ori_labels
                 with torch.no_grad():
                     tgt_feature = pc_encoder(ori_pc[..., :6])
                     if torch.isnan(tgt_feature).any():
@@ -341,47 +269,79 @@ def main(args):
                         continue
                     tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
 
-
                 
-            adv_pc, success_num, eval_result = HiT_attacker.attack( ori_pc, tgt_labels, tgt_feature )
-            success_nums += success_num
-            for j in range(ori_pc.shape[0]):
-                if i * args.batch_size + j < eval_attack_num:
-                    continue
+            attack_ids, attack_pcs = [], []
+            attack_ori_labels, attack_tgt_labels = [], []  
+            attack_tgt_feature = []   
+            for j in range(len(ori_id)):
                 if is_targeted:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}_{tgt_id[j]}"})
+                    attack_id = f"{ori_id[j]}_{tgt_id[j]}"  
                 else:
-                    eval_result[j].update({'object_id': f"{ori_id[j]}"})
-            
-            eval_results.extend(eval_result)
+                    attack_id = f"{ori_id[j]}"  
 
-            ori_pc = ori_pc.float().cpu().numpy() 
-            if is_targeted:
-                saved_label = tgt_data_dict['label']
-                for b, (oid, op, tid, ap, adv_label) in enumerate( zip(ori_id, ori_pc, tgt_id, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}_{tid}")
-                        adv_pc_file_name_list.append(f"{oid}_{tid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
-            else:
-                saved_label = ori_data_dict['label']
-                for b, (oid, op, ap, adv_label) in enumerate( zip(ori_id, ori_pc, adv_pc, saved_label) ):
-                    if dataset_type == 'ModelNet':
-                        obj_id_list.append(oid.item())
-                    else:
-                        obj_id_list.append(f"{oid}")
-                        adv_pc_file_name_list.append(f"{oid}_{args.pointnum}.npy")
-                    ori_pc_list.append(op)
-                    adv_pc_list.append(ap)
-                    adv_label_list.append(adv_label)
+                if attack_id not in attack_id_list: 
+                    attack_ids.append(attack_id)
+                    attack_pcs.append(ori_pc[j])
+                    attack_ori_labels.append(ori_labels[j])
+                    attack_tgt_labels.append(tgt_labels[j])
+                    attack_tgt_feature.append(tgt_feature[j])
+            if len(attack_ids) == 0:
+                print(f"Skip {i}th batch, since all the objects have been evaluated.")
+                continue    
+            
+                
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            predict_accuracies, evaluation_results = eval_func(attack_pcs, attack_ori_labels)
+            
+            if not is_targeted:
+                predict_accuracies = 1 - predict_accuracies
+            
+            if predict_accuracies.sum() == 0:
+                print(evaluation_results)
+                print(f"Skip {i}th batch, since all data are negative samples.")
+                continue
+           
+            # print(attack_ids)
+            # print(predict_accuracies)
+            # Only keep attack_ids where predict_accuracies == 1
+            attack_ids = [attack_ids[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            # print(attack_ids)
+            attack_pcs =  [attack_pcs[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            
+            attack_ori_labels = [attack_ori_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            attack_tgt_labels = [attack_tgt_labels[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            attack_tgt_feature = [attack_tgt_feature[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
+            
+
+            attack_pcs = torch.stack(attack_pcs, dim=0)
+            attack_tgt_feature = torch.stack(attack_tgt_feature, dim=0)
+            
+            adv_pcs, success_num, eval_result = HiT_attacker.attack( attack_pcs, attack_tgt_labels, attack_tgt_feature )
+            success_nums += success_num
+
+            for j, (attack_id, attack_ori_label) in enumerate(zip(attack_ids, attack_ori_labels)):
+                eval_result[j].update({'object_id': attack_id} )
+                if is_targeted:
+                    eval_result[j].update({'original_label': attack_ori_label} )
+            eval_results.extend(eval_result)
+            
+            attack_pcs = attack_pcs.float().cpu().numpy()
+            
+            for attack_id, attack_pc, adv_pc, attack_tgt_label in  zip(attack_ids, attack_pcs, adv_pcs, attack_tgt_labels):
+                attack_id_list.append(attack_id)
+                if dataset_type == 'Objaverse':
+                    adv_pc_file_name_list.append(f"{attack_id}_{args.pointnum}.npy")
+                attack_pc_list.append(attack_pc)
+                adv_pc_list.append(adv_pc)
+                adv_label_list.append(attack_tgt_label)
+            
+            # break
+            
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
-    
-    success_rate += success_nums / len(ori_dataset)       
+
+    saved_results['attack_pc_number'] = len(attack_pc_list)
+    success_rate = success_nums / len(attack_pc_list)
     print("attack success rate: ", success_rate)
     saved_results['ASR'] = success_rate
     saved_results['eval_results'] = eval_results
@@ -405,9 +365,10 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, args.output_eval_path, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
     
+
  
 
 if __name__ == '__main__':

@@ -56,10 +56,9 @@ class PointCloudEvaluator:
         }
     
  
-def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, device, evaluated_results = None):
+def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, evaluated_results = None, device = 'cuda'):
     
     pc_evaluator = PointCloudEvaluator(k_nn=32, device=device)
-    
     
     results = []
     overall_results = {

@@ -25,3 +25,4 @@ visualize*
 generate_category_name_of_tgt_pc_by_GPT.py
 
 **/gpt4point_evaluation.sh
+**/filter_negative_samples.sh

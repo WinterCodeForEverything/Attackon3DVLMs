@@ -21,9 +21,10 @@ from dataset.data.objaverse import ObjaverseDataset
 from dataset.data.utils import redirect_normals
 
 from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
+from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
-from attack_methods.evaluation.pc_evaluator.pc_evaluator import PointCloudEvaluator
+# from attack_methods.evaluation.pc_evaluator.pc_evaluator import PointCloudEvaluator
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -211,78 +212,6 @@ class ModelGeneration(torch.nn.Module):
         
         return outputs
 
-def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, evaluated_results = None):
-    
-    pc_evaluator = PointCloudEvaluator(k_nn=32, device=device)
-    
-    
-    results = []
-    overall_results = {
-            'knn_dist': [],
-            'uniform_dist': [],
-            'curv_std_dist': [],
-            'chamfer_dist': [],
-            'hausdorff_dist': []
-    }
-    
-    statistic_object_ids = []
-    statistic_ori_xyz, statistic_ori_normal, statistic_adv_xyz = [], [], []
-    for i, (obj_id, ori_pc, adv_pc ) in enumerate(zip(obj_id_list, ori_pc_list, adv_pc_list)):
-        # ori_pc = ori_data['point_clouds'].to(device)
-        # adv_pc = adv_data['point_clouds'].to(device)
-        
-        # obj_ids = adv_data['object_ids']
-        
-        ori_xyz = ori_pc[..., :3]
-        ori_normal = ori_pc[..., 6:9]
-        adv_xyz = adv_pc[..., :3]
-        
-        if evaluated_results is not None:
-            if evaluated_results[i]['accuracy'] == 1:
-                    statistic_object_ids.append(obj_id)
-                    statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-                    statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device, dtype=torch.float32))
-                    statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-        else:
-            statistic_object_ids.append(obj_id)
-            statistic_ori_xyz.append(torch.from_numpy(ori_xyz).to(device, dtype=torch.float32))
-            statistic_adv_xyz.append(torch.from_numpy(adv_xyz).to(device))
-            statistic_ori_normal.append(torch.from_numpy(ori_normal).to(device, dtype=torch.float32))
-    # print( "len(statistic_object_ids):", len(statistic_object_ids))
-    for j in range(len(statistic_ori_xyz)):
-        obj_id = statistic_object_ids[j]
-        ori_xyz = statistic_ori_xyz[j].unsqueeze(0)
-        adv_xyz = statistic_adv_xyz[j].unsqueeze(0)
-        ori_normal = statistic_ori_normal[j].unsqueeze(0)
-        pc_result = pc_evaluator.evaluate(ori_xyz, adv_xyz, ori_normal)
-        
-        pc_result =  {metric: float(value.cpu().numpy()) for metric, value in pc_result.items()}
-        for metrics, values in pc_result.items():
-            overall_results[metrics].append( values )
-
-        pc_result['obj_id'] = obj_id
-        results.append(pc_result)
-        
-    average_results = {}
-    for metrics, values in overall_results.items():
-        average_results[metrics] = float(np.mean((values)))
-        
-    print(f"Average knn_dist: {average_results['knn_dist']}")
-    print(f"Average uniform_dist: {average_results['uniform_dist']}")
-    print(f"Average curv_std_dist: {average_results['curv_std_dist']}")
-    print(f"Average chamfer_dist: {average_results['chamfer_dist']}")
-    print(f"Average hausdorff_dist: {average_results['hausdorff_dist']}")
-    
-    # * save the results
-    save_results = {
-        'overall_results': average_results,
-        'results': results
-    }
-    os.makedirs(output_eval_dir, exist_ok=True)
-    with open(os.path.join(output_eval_dir, 'pc_evaluation_results_recall_in_training.json'), 'w') as fp:
-        json.dump(save_results, fp, indent=4)
-
-
 
 def main(args):
     
@@ -405,7 +334,11 @@ def main(args):
             ori_id = ori_data_dict['object_id']
             tgt_id = tgt_data_dict['object_id']   
             ori_pc = ori_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32
-            ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+
+            if dataset_type == 'ModelNet':
+                ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
+            else:
+                ori_labels = ori_data_dict['label']
             # tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype= torch.float32) # * convert to float32 
             if is_targeted:
                 if dataset_type == 'ModelNet':
@@ -413,10 +346,7 @@ def main(args):
                 else:
                     tgt_labels = tgt_data_dict['label']
             else:
-                if dataset_type == 'ModelNet':
-                    tgt_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
-                else:
-                    tgt_labels = ori_data_dict['label']
+                tgt_labels = ori_labels
             
             attack_ids, attack_pcs = [], []
             attack_ori_labels, attack_tgt_labels = [], []     
@@ -482,8 +412,9 @@ def main(args):
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     
+    saved_results['attack_pc_number'] = len(attack_pc_list)
     success_rate = success_nums / len(attack_pc_list)
-    print("attack success rate: ", success_rate)
+    print("attack success rate: ", success_rate) 
     saved_results['ASR'] = success_rate
     saved_results['eval_results'] = eval_results
     
@@ -506,7 +437,7 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results)
+        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
     
  
