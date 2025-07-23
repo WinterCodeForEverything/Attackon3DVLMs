@@ -127,6 +127,8 @@ class ModelGeneration(torch.nn.Module):
 
 def main(args):
     
+    valid_state = 1
+    
     #lr = args.lr
     #budget = args.budget
     is_targeted = args.is_targeted 
@@ -338,6 +340,7 @@ def main(args):
             # break
             
     except Exception as e:
+        valid_state = 0
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
 
     saved_results['attack_pc_number'] = len(attack_pc_list)
@@ -367,6 +370,9 @@ def main(args):
         print("Starting point cloud evaluation...")
         start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
         print("Point cloud evaluation finished.")
+        
+        
+    return valid_state
     
 
  
@@ -449,6 +455,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    main(args)
+    valid_state = 0
+    while valid_state == 0:
+        valid_state = main(args)
     
     

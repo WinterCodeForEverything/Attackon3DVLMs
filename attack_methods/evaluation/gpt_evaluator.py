@@ -179,8 +179,9 @@ class GPTEvaluation(torch.nn.Module):
         try:
             gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)   
         except openai.RateLimitError:
-        # handle rate limit error
-            print(f"GPT response: {gpt_response}")
+            # handle rate limit error
+            print("openai.RateLimitError:", openai.RateLimitError)
+            # print(f"GPT response: {gpt_response}")
         
 
         # prompt_tokens = gpt_response['usage']['prompt_tokens']

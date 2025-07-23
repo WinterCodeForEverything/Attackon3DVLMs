@@ -279,7 +279,8 @@ def main(args):
     
     
     success_nums = success_rate * len(attack_pc_list)
-    captioning_total_score = captioning_average_score * len(attack_pc_list)
+    if task_type == 'captioning':
+        captioning_total_score = captioning_average_score * len(attack_pc_list)
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
 
