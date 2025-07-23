@@ -85,6 +85,8 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
 
 def main(args):
     
+    valid_state = 1
+    
     positive_nums = 0
     total_evaluate_results = []
     if os.path.exists(args.output_eval_file):
@@ -117,7 +119,11 @@ def main(args):
     if args.dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
     try:
+    # if 1:
         for i, data in tqdm(enumerate(dataloader), total=len(dataloader)):
+            if i * args.batch_size < len(total_evaluate_results):
+                print(f"Skipping batch {i}, already evaluated {i * args.batch_size} samples.")
+                continue
             object_ids = data['object_id']
             point_clouds = data['point_cloud'].to(dtype=args.dtype, device=args.device)
             if args.dataset_type == 'ModelNet':
@@ -129,10 +135,14 @@ def main(args):
 
             positive_nums += sum(predict_accuracies)
             for j, result in enumerate(evaluation_results):
-                result['object_id'] = object_ids[j].item()
+                if args.dataset_type == 'ModelNet':
+                    result['object_id'] = object_ids[j].item()
+                else:
+                    result['object_id'] = object_ids[j]
                 total_evaluate_results.append(result)
-
+            # break
     except Exception as e:
+        valid_state = 0
         print(f"Error during evaluation: {e}")
 
     predict_accuracies =  positive_nums / len(dataloader.dataset)
@@ -148,6 +158,8 @@ def main(args):
     with open(args.output_eval_file, "w") as f:
         json.dump(saved_results, f, indent=4)
         print(f"Saved evaluation results to {args.output_eval_file}")
+        
+    return valid_state
 
 if __name__ == '__main__':
     
@@ -183,4 +195,6 @@ if __name__ == '__main__':
     parser.add_argument("--gpt_type", type=str, default="gpt-4o-mini", choices=[ "gpt-4.1-mini", "gpt-4o-mini"], help="Type of the model used to evaluate.")
     args = parser.parse_args()
     
-    main(args)
+    valid_state = 0
+    while valid_state == 0:
+        valid_state = main(args)
