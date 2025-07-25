@@ -4,15 +4,17 @@ from torch.nn import CrossEntropyLoss
 IGNORE_INDEX = -100
 
 class FeatureSimilarityLoss(torch.nn.Module):
-    def __init__(self, model, is_targeted=True):
+    def __init__(self, model, dtype, is_targeted=True):
         super(FeatureSimilarityLoss, self).__init__()
         self.model = model
+        self.dtype = dtype
         self.is_targeted = is_targeted
         
     def forward(self, adv_pc, tgt_feature):
         
         if adv_pc.shape[-1] > 6:
             adv_pc = adv_pc[..., :6]
+        adv_pc = adv_pc.to(dtype=self.dtype)
         # adv_pc = adv_pc.to(device)
         adv_feature = self.model(adv_pc)
         #tgt_feature = self.model(tgt_pc)
@@ -27,7 +29,7 @@ class FeatureSimilarityLoss(torch.nn.Module):
         # Add L2 distance loss to improve feature similarity loss
         l2_loss = torch.mean(torch.norm(adv_feature - tgt_feature, dim=2))
         # Combine cosine similarity loss and L2 loss
-        loss = (1 - embedding_sim) + l2_loss if self.is_targeted else embedding_sim - l2_loss
+        loss = (1 - embedding_sim) + 0.1*l2_loss if self.is_targeted else embedding_sim - 0.1*l2_loss
         return loss
 
 

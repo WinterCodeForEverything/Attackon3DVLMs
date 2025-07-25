@@ -149,25 +149,58 @@ class GPTEvaluation(torch.nn.Module):
         B = adv_pc.shape[0]
         accuracies = np.zeros(B, dtype=np.int32)
         results = []
+        
+        batched_prompt = ""
+        batch_indices = []
         for i in range(B):
+            batched_prompt += f"Example {i+1}:\nInput: 1. {tgt_labels[i]} 2. {model_outputs[i]}\nOutput:\n"
+            batch_indices.append(i)
+
+        messages = [{"role": "user", "content": self.gpt_prompt.replace("Now, analyze the following:\nInput: 1. {ground_truth} 2. {model_output}  \nOutput:", batched_prompt)}]
+
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        gpt_response_content = gpt_response['choices'][0]["message"]['content']
+
+        # Split responses by "Example" and parse each
+        response_blocks = re.split(r'Example \d+:\s*', gpt_response_content)
+        response_blocks = [block.strip() for block in response_blocks if block.strip()]
+
+        for i, block in enumerate(response_blocks):
+            # Expecting "Output: T#reason" or "T#reason"
+            output_line = block.split('\n')[-1].replace("Output:", "").strip()
+            accuracy, cls_result, reason = self.parse_gpt_response_evaluate(output_line)
+            if not self.is_targeted:
+                accuracy = 1 - accuracy
+            accuracies[i] = accuracy
             result = {
                 'ground_truth': tgt_labels[i],
                 'model_output': model_outputs[i],
-                
-            }
-            accuracy, cls_result, reason = self.evaluate_result( result )
-            if not self.is_targeted:
-                accuracy = 1 - accuracy # * for untargeted attack, we want to maximize the difference
-            # accuracy =
-            accuracies[i] = accuracy
-            result.update({
                 'accuracy': accuracy,
                 'cls_result': cls_result,
                 'reason': reason
-            })
-            # print(result)
+            }
             results.append(result)
-        # print(results)
+            
+            
+        # for i in range(B):
+        #     result = {
+        #         'ground_truth': tgt_labels[i],
+        #         'model_output': model_outputs[i],
+                
+        #     }
+        #     accuracy, cls_result, reason = self.evaluate_result( result )
+        #     if not self.is_targeted:
+        #         accuracy = 1 - accuracy # * for untargeted attack, we want to maximize the difference
+        #     # accuracy =
+        #     accuracies[i] = accuracy
+        #     result.update({
+        #         'accuracy': accuracy,
+        #         'cls_result': cls_result,
+        #         'reason': reason
+        #     })
+        #     # print(result)
+        #     results.append(result)
+        # # print(results)
 
         return accuracies, results
     
@@ -216,6 +249,140 @@ class GPTEvaluation(torch.nn.Module):
 
         accuracy = 1 if cls_result == 'T' else 0
         return accuracy, cls_result, reason
+
+
+gpt4_open_free_from_cls_batched_prompt = """You are given several pairs of sentences. For each pair, determine whether they refer to the same general **category** of object or concept — ignoring differences in style, size, color, material, or realism (e.g., cartoon vs realistic). Focus only on the object's **type** or **semantic category**.
+
+For each pair:
+- Respond with 'T' if both refer to the same category.
+- Respond with 'F' if they refer to different categories.
+- Follow the response with a '#' and a brief justification (≤20 words).
+
+### Format:
+Input i: <sentence 1> || <sentence 2>  
+Output i: T/F#<brief reason>
+
+### Example:
+
+Input 1: Spiral staircase that goes from a ground floor || This is a 3D model of wooden stairs in light brown  
+Output 1: T#Both refer to staircases.
+
+Input 2: Animation of a penguin with a crown || A penguin wearing a hat  
+Output 2: T#Both describe penguins.
+
+Input 3: A red car || A white boat  
+Output 3: F#Car and boat are different types of vehicles.
+
+Now, analyze the following:
+
+{batched_inputs}
+"""
+
+
+class GPTBatchEvaluation(torch.nn.Module):
+    def __init__(self, Generation, gpt_type, is_targeted=True):   
+        super(GPTBatchEvaluation, self).__init__()
+        self.Generation = Generation
+        self.gpt_prompt = gpt4_open_free_from_cls_batched_prompt
+        self.invalid_responses = 0
+        self.is_targeted = is_targeted
+
+        self.default_chat_parameters = {
+            "model": gpt_type,
+            "temperature": 1, 
+            "top_p": 1, 
+            "max_tokens": 2048
+        }
+
+        self.openaigpt = OpenAIGPT(**self.default_chat_parameters)
+        # Ensure results length matches B by padding or truncating
+
+    def forward(self, adv_pc, tgt_labels):
+        if adv_pc.shape[-1] > 6:
+            adv_pc = adv_pc[..., :6]
+
+        model_outputs = self.Generation.generate(adv_pc)  # * B, L'
+        B = adv_pc.shape[0]
+        accuracies = np.zeros(B, dtype=np.int32)
+        results = []
+
+        # Build batched input string for the prompt
+        batched_inputs = ""
+        for i in range(B):
+            batched_inputs += f"Input {i+1}: {tgt_labels[i]} || {model_outputs[i]}\n"
+
+        prompt = self.gpt_prompt.format(batched_inputs=batched_inputs)
+        messages = [{"role": "user", "content": prompt}]
+
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        gpt_response_content = gpt_response['choices'][0]["message"]['content']
+
+        # Parse each output line
+        output_lines = re.findall(r'Output \d+:\s*(.*)', gpt_response_content)
+        # If not found, fallback to splitting by lines and filtering
+        if not output_lines:
+            output_lines = [line for line in gpt_response_content.split('\n') if line.strip().startswith(('T', 'F'))]
+
+        # If fewer outputs than inputs, pad with "F#Missed output"
+        while len(output_lines) < B:
+            output_lines.append("F#Missed output")
+        if len(output_lines) > B:
+            output_lines = output_lines[:B]
+
+        for i in range(B):
+            output_line = output_lines[i].strip()
+            accuracy, cls_result, reason = self.parse_gpt_response_evaluate(output_line)
+            if not self.is_targeted:
+                accuracy = 1 - accuracy
+            accuracies[i] = accuracy
+            result = {
+                'ground_truth': tgt_labels[i],
+                'model_output': model_outputs[i],
+                'accuracy': accuracy,
+                'cls_result': cls_result,
+                'reason': reason
+            }
+            results.append(result)
+
+        return accuracies, results
+
+    def evaluate_result(self, result):
+        ground_truth = result['ground_truth']
+        model_output = result['model_output']
+        batched_inputs = f"Input 1: {ground_truth} || {model_output}\n"
+        prompt = self.gpt_prompt.format(batched_inputs=batched_inputs)
+        messages = [{"role": "user", "content": prompt}]
+
+        try:
+            gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        except openai.RateLimitError:
+            print("openai.RateLimitError:", openai.RateLimitError)
+
+        gpt_response_content = gpt_response['choices'][0]["message"]['content']
+        # Parse output line
+        match = re.search(r'Output 1:\s*(.*)', gpt_response_content)
+        output_line = match.group(1).strip() if match else gpt_response_content.strip()
+        accuracy, cls_result, reason = self.parse_gpt_response_evaluate(output_line)
+        return accuracy, cls_result, reason
+
+    def parse_gpt_response_evaluate(self, gpt_response):
+        gpt_response = gpt_response.strip()
+        # Attempt to split using the '#' delimiter
+        if '#' in gpt_response:
+            parts = gpt_response.split('#', 1)
+            cls_result = parts[0].strip().upper()
+            reason = parts[1].strip()
+        else:
+            cls_result = gpt_response[0].strip().upper() if gpt_response else ""
+            reason = gpt_response[1:].strip() if len(gpt_response) > 1 else ""
+
+        if cls_result not in ['T', 'F']:
+            self.invalid_responses += 1
+            return 0, "INVALID", gpt_response
+
+        accuracy = 1 if cls_result == 'T' else 0
+        return accuracy, cls_result, reason
+
 
 
 class GPTObjectCaptioningEvaluator(torch.nn.Module):

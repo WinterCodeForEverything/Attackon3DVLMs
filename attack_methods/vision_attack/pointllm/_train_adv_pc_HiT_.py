@@ -61,7 +61,6 @@ def init_model(args):
     return model, tokenizer, conv
 
 
-
 def load_dataset(dataset_type, data_path, anno_path=None, normalized_pc=True,
                  has_color=True, has_normal=True, redirect_normals=False,
                  use_color=True, use_normal=True, pts_processor=None, text_processor=None):
@@ -357,7 +356,8 @@ def main(args):
                     ori_pc_list.append(op)
                     adv_pc_list.append(ap)
                     adv_label_list.append(adv_label)
-            # break
+            if i > 1:
+                break
     except Exception as e:
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
     

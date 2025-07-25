@@ -16,6 +16,7 @@ class PointLLMGenerator(torch.nn.Module):
         self.top_p = llm_args.top_p
         self.num_beams = llm_args.num_beams
         self.max_length = llm_args.max_length
+        self.dtype = getattr(torch, llm_args.dtype)
         # stopping_criteria
         
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
@@ -39,7 +40,7 @@ class PointLLMGenerator(torch.nn.Module):
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
-                point_clouds=point_clouds.to(torch.bfloat16),
+                point_clouds=point_clouds.to(dtype=self.dtype), 
                 do_sample= True if self.temperature > 0.0 else False,
                 temperature= self.temperature if self.temperature > 0.0 else None,
                 top_k=self.top_k,

@@ -17,19 +17,20 @@ from victim_models.pointllm.utils import disable_torch_init
 from victim_models.pointllm.model import *
 
 from attack_methods.evaluation.model_generator import PointLLMGenerator, GPT4PointGenerator
-from attack_methods.evaluation.gpt_evaluator import GPTEvaluation
+from attack_methods.evaluation.gpt_evaluator import GPTBatchEvaluation
 
 
 def init_PointLLM(args):
     # Model
     disable_torch_init()
     model_name = os.path.expanduser(args.model_name)
+    dtype = getattr(torch, args.dtype)
 
     # * print the model_name (get the basename)
     print(f'[INFO] Model name: {os.path.basename(model_name)}')
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=args.dtype).to(args.device)
+    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=dtype).to(args.device)
     model.get_model().fix_pointnet = False
     model.get_model().fix_llm = False
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
@@ -86,6 +87,7 @@ def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
 def main(args):
     
     valid_state = 1
+    dtype = getattr(torch, args.dtype)
     
     positive_nums = 0
     total_evaluate_results = []
@@ -101,10 +103,10 @@ def main(args):
     
     elif args.generator_type == 'GPT4Point':
         model, vis_processors, txt_processors = load_model_and_preprocess(name=args.model_name, model_type=args.model_type, is_eval=True, device=args.device)
-        generator = GPT4PointGenerator(model=model, vis_processors=vis_processors, txt_processors=txt_processors, llm_args=args)
+        generator = GPT4PointGenerator(model=model, llm_args=args)
 
     # Initialize the evaluator
-    eval_func = GPTEvaluation( generator, args.gpt_type )
+    eval_func = GPTBatchEvaluation( generator, args.gpt_type )
 
     # Load the dataset
     input_dataset = load_dataset( dataset_type = args.dataset_type, data_path= args.data_path, anno_path= args.anno_path,
@@ -125,7 +127,7 @@ def main(args):
                 print(f"Skipping batch {i}, already evaluated {i * args.batch_size} samples.")
                 continue
             object_ids = data['object_id']
-            point_clouds = data['point_cloud'].to(dtype=args.dtype, device=args.device)
+            point_clouds = data['point_cloud'].to(dtype=dtype, device=args.device)
             if args.dataset_type == 'ModelNet':
                 labels = [modelnet_cat_list[label.item()] for label in data['label']]
             else:
@@ -167,7 +169,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, required=True, help='Path or name of the pretrained model')
     parser.add_argument('--model_type', type=str, default='vicuna', help='Type of the model (for GPT4Point)')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run the model on')
-    parser.add_argument('--dtype', type=torch.dtype, default=torch.bfloat16, choices=[torch.bfloat16, torch.float16, torch.float32], help='Data type for the model')
+    parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type for the model (e.g., float16, float32)')
     
     parser.add_argument("--dataset_type", type=str, default='ModelNet', choices=['ModelNet', 'Objaverse'])
     parser.add_argument('--data_path', type=str, default='data/modelnet40')
