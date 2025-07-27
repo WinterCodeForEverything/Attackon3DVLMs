@@ -34,7 +34,7 @@ from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluat
 
 
 
-def init_PointLLM(model_name, dtype, device):
+def init_PointLLM(model_name, dtype, device, is_eval=True):
     # Model
     disable_torch_init()
     model_name = os.path.expanduser(model_name)
@@ -44,6 +44,8 @@ def init_PointLLM(model_name, dtype, device):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=dtype).to(device)
+    if is_eval:
+        model.eval()
     model.get_model().fix_pointnet = False
     model.get_model().fix_llm = False
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)

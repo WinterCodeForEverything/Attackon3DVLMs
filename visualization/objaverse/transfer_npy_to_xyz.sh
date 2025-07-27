@@ -1,2 +1,0 @@
-python transfer_npy_to_xyz.py --input_pc_path /mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_npy_gpt4point_cp_normals_tgt \
-                            --output_pc_path /mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_xyz_gpt4point_cp_normals_tgt

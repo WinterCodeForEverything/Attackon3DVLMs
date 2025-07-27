@@ -270,24 +270,10 @@ class HiT_ADV:
                         bestdist[e] = dist
                         bestscore[e] = al
                         bestattack[e] = ii
-                    # # tar*
-                    # if   al < o_bestscore[e]:   
-                    #     # print('pert', pert, 'gauss_delta', gd)
-                    #     o_bestdist[e] = dist
-                    #     o_bestscore[e] = al
-                    #     o_bestattack[e] = ii
-                    #     # o_best_pertmat[e] = pert
-                    #     # o_best_gaussdelta[e] = gd
 
                 t3 = time.time()
                 update_time += t3 - t2
 
-                # compute loss and backward
-
-                #adv_loss = 1 - feat_simility
-                # l2 dist or chamfer dist
-                # l2_loss = l2_dist(tmp_adv_data, ori_data, torch.from_numpy(l2_weight))
-                # dist_loss += l2_loss
 
                 if cd_weight[0] != 0:
                     chamfer_loss = chamfer_dist(tmp_adv_data, ori_data, torch.from_numpy(cd_weight))
@@ -381,7 +367,9 @@ class HiT_ADV:
         success_num = np.sum(o_success_attack)
         print('Successfully attack {}/{}'.format(success_num, B))
         
-        o_adv_pc = np.concatenate((o_bestattack.transpose((0, 2, 1)), ori_pc[..., 3:].float().cpu().numpy(), ), axis=-1)  # [B, K, 6]
+        saved_xyz = o_bestattack.transpose(1, 2)  # [B, K, 3]
+        saved_normal = ori_normal.transpose(1, 2).contiguous()  # [B, N, 3]
+        o_adv_pc = np.concatenate((saved_xyz, ori_color.float().cpu().numpy(), saved_normal.float().cpu().numpy()), axis=-1)  # [B, K, 9]
         return o_adv_pc, success_num, o_eval_results
 
     def chamfer_distance(self, points1, points2):
