@@ -367,7 +367,7 @@ class HiT_ADV:
         success_num = np.sum(o_success_attack)
         print('Successfully attack {}/{}'.format(success_num, B))
         
-        saved_xyz = o_bestattack.transpose(1, 2)  # [B, K, 3]
+        saved_xyz = o_bestattack.transpose((0, 2, 1))  # [B, K, 3]
         saved_normal = ori_normal.transpose(1, 2).contiguous()  # [B, N, 3]
         o_adv_pc = np.concatenate((saved_xyz, ori_color.float().cpu().numpy(), saved_normal.float().cpu().numpy()), axis=-1)  # [B, K, 9]
         return o_adv_pc, success_num, o_eval_results
