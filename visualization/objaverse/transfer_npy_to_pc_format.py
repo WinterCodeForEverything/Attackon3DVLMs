@@ -90,12 +90,14 @@ def npy_to_ply(input_pc_path, output_pc_path, eval_results_path=None, visualized
         if 1:
             ori_pc_file = filename.split('/')[-1]
             ori_pc_id = os.path.splitext(ori_pc_file)[0]
+            ori_pc_id = ori_pc_id.split('_')[0]
             ori_pc_file_path = os.path.join("/mnt/ssd/liuchao/Attackon3DVLMs/Objaverse_ori_npy", f"{ori_pc_id}_8192.npy")
             ori_pc = np.load(ori_pc_file_path)
             colors = ori_pc[:, 3:6]
         pcd.colors = o3d.utility.Vector3dVector(colors)
         pcd.normals = o3d.utility.Vector3dVector(points[:, 6:9])
         o3d.io.write_point_cloud(filename, pcd)
+        # print(f"Saved {filename} with {len(points)} points.")
 
     npy_files = [f for f in os.listdir(input_pc_path) if f.endswith('.npy')]
     npy_files.sort()

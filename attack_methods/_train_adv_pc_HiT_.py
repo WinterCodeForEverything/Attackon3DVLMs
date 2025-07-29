@@ -27,7 +27,7 @@ from victim_models.pointllm.model import PointLLMLlamaForCausalLM
 from attack_methods.evaluation.loss_module import FeatureSimilarityLoss, GPT4PointCaptionLoss, PointLLMCaptionLoss
 
 from attack_methods.evaluation.model_generator import PointLLMGenerator, GPT4PointGenerator
-from attack_methods.evaluation.gpt_evaluator import GPTBatchEvaluation
+from attack_methods.evaluation.gpt_evaluator import GPTBatchEvaluation, GPTObjectCaptioningEvaluator
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
 from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
@@ -110,6 +110,7 @@ def main(args):
     attack_method = args.attack_method
     is_targeted = args.is_targeted 
     dataset_type = args.dataset_type
+    task_type = args.task_type
     assert dataset_type in ['ModelNet', 'Objaverse'], f"Unsupported dataset type: {dataset_type}"
     output_pc_path = args.output_pc_path
     device = args.device
@@ -133,6 +134,7 @@ def main(args):
         adv_annos = json.load(open(args.adv_anno_path, "r"))
     
     success_rate = 0.0
+    average_gpt_score = 0.0
     saved_results = {}  #{"prompt": PROMPT_LISTS[args.prompt_index] }
     eval_results = []
     attack_id_list, attack_pc_list = [], []
@@ -147,6 +149,7 @@ def main(args):
         eval_data = json.load(open(output_eval_file, "r"))
         eval_results = eval_data.get('eval_results', [])
         success_rate = eval_data.get('ASR', 0.0)
+        average_gpt_score = eval_data.get('average_gpt_score', 0.0)
         for eval_result in eval_results:
             attack_id_list.append(eval_result['object_id']) # * use index as object id
         if dataset_type == 'ModelNet':
@@ -176,7 +179,10 @@ def main(args):
     
     if args.start_pc_eval and not args.start_gpt_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
+        if task_type == 'captioning':
+            start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, device=device)
+        else:
+            start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device=device)
         print("Point cloud evaluation finished.")
 
         return valid_state
@@ -214,8 +220,11 @@ def main(args):
             # generator = PointLLMGenerator(model=model, tokenizer=tokenizer, conv=conv, llm_args=args)
             generator = PointLLMGenerator( model, tokenizer, conv, args )
         
-        
-    eval_func = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+    if task_type == 'classification':
+        eval_func = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+    elif task_type == 'captioning':
+        eval_func = GPTObjectCaptioningEvaluator( generator, args.gpt_type, is_targeted=is_targeted,
+                                                  success_score_threshold=args.success_score_threshold )
         
     ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, anno_path= args.ori_anno_path,
                                 normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
@@ -246,6 +255,7 @@ def main(args):
     
         
     success_nums = success_rate * len(attack_pc_list)
+    total_gpt_score = average_gpt_score * len(attack_pc_list)
     if dataset_type == 'ModelNet':
         modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
     
@@ -255,10 +265,10 @@ def main(args):
         for result in pretrained_eval_results:
             pretrained_eval_results_dict[str(result['object_id'])] = result
 
-    try:
-    # if 1:
+    # try:
+    if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
-            if 'pointllm' in model_type and i % 4 != 0:
+            if 'pointllm' in model_type and task_type == 'classification' and i % 4 != 0:
                 continue
             
             ori_id = ori_data_dict['object_id']
@@ -355,6 +365,8 @@ def main(args):
 
             for j, (attack_id, attack_ori_label) in enumerate(zip(attack_ids, attack_ori_labels)):
                 eval_result[j].update({'object_id': attack_id} )
+                if task_type == 'captioning':
+                    total_gpt_score += eval_result[j].get('gpt_score', 0.0)
                 if is_targeted:
                     eval_result[j].update({'original_label': attack_ori_label} )
             eval_results.extend(eval_result)
@@ -368,16 +380,20 @@ def main(args):
                 attack_pc_list.append(attack_pc)
                 adv_pc_list.append(adv_pc)
                 adv_label_list.append(attack_tgt_label)            
-            # break
+            break
             
-    except Exception as e:
-        valid_state = 0
-        print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
+    # except Exception as e:
+    #     valid_state = 0
+    #     print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
 
     saved_results['attack_pc_number'] = len(attack_pc_list)
     success_rate = success_nums / len(attack_pc_list)
     print("attack success rate: ", success_rate) 
     saved_results['ASR'] = success_rate
+    if task_type == 'captioning':
+        average_gpt_score = total_gpt_score / len(attack_pc_list)
+        print("average gpt score: ", average_gpt_score)
+        saved_results['average_gpt_score'] = average_gpt_score
     saved_results['eval_results'] = eval_results
     
     # * Save evaluation results
@@ -399,7 +415,10 @@ def main(args):
             
     if args.start_pc_eval:
         print("Starting point cloud evaluation...")
-        start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device)
+        if task_type == 'captioning':
+            start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, device=device)
+        else:
+            start_pc_evaluation(attack_pc_list, adv_pc_list, attack_id_list, args.output_eval_path, eval_results, device=device)
         print("Point cloud evaluation finished.")
 
     return valid_state
@@ -424,6 +443,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--top_p", type=float, default=0.95)
     
+    parser.add_argument("--task_type", type=str, default="classification", choices=["classification", "captioning"], help="Task type for the attack.")
     parser.add_argument("--attack_method",  type=str, default="vision_attack", choices=["vision_attack", "caption_attack"])
     parser.add_argument("--is_targeted",  action="store_true", default=False)
     parser.add_argument("--attack_lr", type=float, default=0.01)
@@ -435,7 +455,7 @@ if __name__ == '__main__':
     parser.add_argument('--init_weight', type=float, default=1.0, help='init_weight')
     parser.add_argument('--max_weight', type=float, default=8.0, help='max_weight')
     parser.add_argument("--prompt_index", type=int, default=0, choices=[0, 1], help="0: What is this? 1: This is an object of ")
-
+    parser.add_argument('--success_score_threshold', type=int, default=50, help='Success score threshold for the attack on captioning task.')
 
     parser.add_argument('--central_num', type=int, default=26)
     parser.add_argument('--total_central_num', type=int, default=2048)

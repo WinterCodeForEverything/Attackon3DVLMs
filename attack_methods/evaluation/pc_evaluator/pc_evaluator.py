@@ -98,6 +98,7 @@ def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, 
         ori_xyz = statistic_ori_xyz[j].unsqueeze(0)
         adv_xyz = statistic_adv_xyz[j].unsqueeze(0)
         ori_normal = statistic_ori_normal[j].unsqueeze(0)
+        print(ori_xyz.shape, adv_xyz.shape, ori_normal.shape)
         pc_result = pc_evaluator.evaluate(ori_xyz, adv_xyz, ori_normal)
         
         pc_result =  {metric: float(value.cpu().numpy()) for metric, value in pc_result.items()}

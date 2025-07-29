@@ -384,7 +384,6 @@ class GPTBatchEvaluation(torch.nn.Module):
         return accuracy, cls_result, reason
 
 
-
 class GPTObjectCaptioningEvaluator(torch.nn.Module):
     def __init__(self, Generation, gpt_type, success_score_threshold, is_targeted=True):
         super(GPTObjectCaptioningEvaluator, self).__init__()
@@ -488,4 +487,119 @@ class GPTObjectCaptioningEvaluator(torch.nn.Module):
 
         gpt_score, reason = self.parse_gpt_response_evaluate(gpt_response) # return 0, "INVALID", gpt_response if not valid
 
+        return gpt_score, reason
+
+gpt4_object_captioning_batch_prompt = (
+    "You are given several pairs of captions. For each pair, evaluate how well the model-generated caption matches the human-written ground truth caption for a 3D object.\n"
+    "For each pair:\n"
+    "1. Identify distinct descriptive aspects in the human caption (such as color, material, shape, function, etc).\n"
+    "2. Compare each aspect to the model's caption. Give full credit if the aspect is exactly matched, partial credit for similar or related concepts.\n"
+    "3. Calculate a score from 0 to 100 based on the proportion of aspects correctly or partially matched.\n"
+    "4. Respond in exactly one line per pair, using the format: Output i: <score>#<short reason>\n"
+    "The reason should be concise (≤15 words), summarizing the main factors for the score.\n"
+    "Only output one line per pair, with no extra explanation or commentary.\n"
+    "Example:\n"
+    "Input 1: Human: A white brown skeleton || Model: This is a 3D model of a small, cartoon-like robot. It has a spherical body and is covered in a layer of white dust.\n"
+    "Output 1: 50#mentions white; skeleton and robot have similar appearance.\n"
+    "Now score the following:\n"
+    "{batched_inputs}"
+)
+
+class GPTObjectCaptioningBatchEvaluator(torch.nn.Module):
+    def __init__(self, Generation, gpt_type, success_score_threshold, is_targeted=True):
+        super(GPTObjectCaptioningBatchEvaluator, self).__init__()
+        self.Generation = Generation
+        self.gpt_type = gpt_type
+        self.success_score_threshold = success_score_threshold
+        self.is_targeted = is_targeted
+        self.gpt_prompt = gpt4_object_captioning_batch_prompt
+
+        self.default_chat_parameters = {
+            "model": gpt_type,
+            "temperature": 1,
+            "top_p": 1,
+            "max_tokens": 2048
+        }
+        self.openaigpt = OpenAIGPT(**self.default_chat_parameters)
+
+    def forward(self, adv_pc, tgt_labels):
+        if adv_pc.shape[-1] > 6:
+            adv_pc = adv_pc[..., :6]
+
+        model_outputs = self.Generation.generate(adv_pc)
+        B = adv_pc.shape[0]
+        accuracies = np.zeros(B, dtype=np.int32)
+        results = []
+
+        # Build batched input string for the prompt
+        batched_inputs = ""
+        for i in range(B):
+            batched_inputs += f"Input {i+1}: Human: {tgt_labels[i]} || Model: {model_outputs[i]}\n"
+
+        prompt = self.gpt_prompt.format(batched_inputs=batched_inputs)
+        messages = [{"role": "user", "content": prompt}]
+
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        gpt_response_content = gpt_response['choices'][0]["message"]['content']
+
+        # Parse each output line
+        output_lines = re.findall(r'Output \d+:\s*(.*)', gpt_response_content)
+        # If not found, fallback to splitting by lines and filtering
+        if not output_lines:
+            output_lines = [line for line in gpt_response_content.split('\n') if line.strip() and (line.strip()[0].isdigit() or '#' in line)]
+
+        # If fewer outputs than inputs, pad with "0#Missed output"
+        while len(output_lines) < B:
+            output_lines.append("0#Missed output")
+        if len(output_lines) > B:
+            output_lines = output_lines[:B]
+
+        for i in range(B):
+            output_line = output_lines[i].strip()
+            gpt_score, reason = self.parse_gpt_response_evaluate(output_line)
+            accuracy = 1 if gpt_score >= self.success_score_threshold else 0
+            if not self.is_targeted:
+                accuracy = 1 - accuracy
+            result = {
+                'ground_truth': tgt_labels[i],
+                'model_output': model_outputs[i],
+                'accuracy': accuracy,
+                'gpt_score': gpt_score,
+                'reason': reason
+            }
+            accuracies[i] = accuracy
+            results.append(result)
+
+        return accuracies, results
+
+    def parse_gpt_response_evaluate(self, gpt_response):
+        gpt_response = gpt_response.strip()
+        gpt_response_list = gpt_response.split('#')
+        gpt_score = gpt_response_list[0]
+        reason = gpt_response_list[1] if len(gpt_response_list) > 1 else ""
+
+        try:
+            gpt_score = int(gpt_score)
+            if gpt_score not in range(101):
+                gpt_score = -1
+        except ValueError:
+            gpt_score = -1
+
+        if gpt_score == -1:
+            reason = gpt_response
+
+        return gpt_score, reason
+
+    def evaluate_result(self, result):
+        ground_truth = result['ground_truth']
+        model_output = result['model_output']
+        batched_inputs = f"Input 1: Human: {ground_truth} || Model: {model_output}\n"
+        prompt = self.gpt_prompt.format(batched_inputs=batched_inputs)
+        messages = [{"role": "user", "content": prompt}]
+
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        gpt_response_content = gpt_response['choices'][0]["message"]['content']
+        match = re.search(r'Output 1:\s*(.*)', gpt_response_content)
+        output_line = match.group(1).strip() if match else gpt_response_content.strip()
+        gpt_score, reason = self.parse_gpt_response_evaluate(output_line)
         return gpt_score, reason
