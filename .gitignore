@@ -10,9 +10,8 @@ modelnet40_data
 *.zip
 *.ipynb
 serving_workdirs
-objaverse_result
-modelnet40_pre_result
-modelnet40_result
+objaverse*_result
+modelnet40*_result
 **/_eval_adv_pc_trans_*.sh
 eval_modelnet_cls.sh
 eval_pointllm_and_llava.sh
@@ -26,4 +25,7 @@ generate_category_name_of_tgt_pc_by_GPT.py
 
 **/gpt4point_evaluation.sh
 **/filter_negative_samples_*.sh
+**/get_clean_gpt_score.sh
+build
+shown_results
 # visualization

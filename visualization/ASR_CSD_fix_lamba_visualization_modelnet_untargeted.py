@@ -55,6 +55,8 @@ CSD2_smooth, ASR2_smooth = smooth_curve(line2['CSD'], line2['ASR'])
 
 plt.figure(figsize=(8, 6))
 
+plt.rcParams.update({'legend.fontsize': 18, 'axes.labelsize': 20, 'xtick.labelsize': 18, 'ytick.labelsize': 18})
+
 # Plot line1
 plt.plot(CSD1_smooth, ASR1_smooth, marker='o', linestyle='-', color=color1, label=name1)
 # for x, y in zip(CSD1, ASR1):
@@ -93,5 +95,5 @@ plt.ylabel('ASR (%)')
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
-plt.savefig('ASR_CSD_untargeted_vision_attack_smooth.jpg', format='jpg')
+plt.savefig('ASR_CSD_untargeted_attack_modelnet_smooth2.jpg', format='jpg')
 plt.show()

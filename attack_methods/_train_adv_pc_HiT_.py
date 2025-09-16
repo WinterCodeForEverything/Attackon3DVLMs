@@ -265,8 +265,8 @@ def main(args):
         for result in pretrained_eval_results:
             pretrained_eval_results_dict[str(result['object_id'])] = result
 
-    # try:
-    if 1:
+    try:
+    # if 1:
         for i, (ori_data_dict, tgt_data_dict) in enumerate(zip(ori_dataloader, tgt_dataloader)):
             if 'pointllm' in model_type and task_type == 'classification' and i % 4 != 0:
                 continue
@@ -380,11 +380,11 @@ def main(args):
                 attack_pc_list.append(attack_pc)
                 adv_pc_list.append(adv_pc)
                 adv_label_list.append(attack_tgt_label)            
-            break
+            # break
             
-    # except Exception as e:
-    #     valid_state = 0
-    #     print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
+    except Exception as e:
+        valid_state = 0
+        print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
 
     saved_results['attack_pc_number'] = len(attack_pc_list)
     success_rate = success_nums / len(attack_pc_list)
