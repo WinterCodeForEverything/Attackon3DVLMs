@@ -55,7 +55,7 @@ from tqdm import tqdm
 class HiT_ADV:
     """Class for HiT_ADV Attack
     """
-    def __init__(self,  adv_func, eval_func, attack_lr=1e-2,
+    def __init__(self,  adv_func, evaluator, attack_lr=1e-2,
                  init_weight=10., max_weight=80., binary_step=10, num_iter=500, clip_func=None,
                  cd_weight=0, curv_weight=0, ker_weight=0, hide_weight=0, curv_loss_knn=32, central_num=32,
                  total_central_num=128, max_sigm=0.7, min_sigm=0.1, budget=0.1, alpha=1, 
@@ -63,7 +63,7 @@ class HiT_ADV:
         # self.model = model.cuda()
         # self.model.eval()
         self.adv_func = adv_func
-        self.eval_func = eval_func
+        self.evaluator = evaluator
         self.attack_lr = attack_lr
         self.init_weight = init_weight
         self.max_weight = max_weight
@@ -154,13 +154,11 @@ class HiT_ADV:
         hide_weight = np.ones((B,)) * self.hide_weight
 
         # record best results in binary search
-        o_bestdist = np.array([1.0] * B)
-        #o_bestscore = np.array([1e6] * B)
-        o_bestattack = np.zeros((B, 3, K))
+        o_bestdist = np.array([1e6] * B)
+        # o_bestattack = np.zeros((B, 3, K))
+        o_bestattack = torch.zeros((B, K, 6)).to(ori_pc.device, dtype=ori_pc.dtype)
         o_success_attack = np.zeros(B, dtype=np.int32)
         o_eval_results = [None] * B
-        # o_best_pertmat = np.zeros((B, self.central_num, 3))
-        # o_best_gaussdelta = np.zeros((B, self.central_num))
 
         ori_kappa = self._get_kappa_ori(ori_data, ori_normal, k=self.curv_loss_knn)  # [b, n]
         # central_kappa_std = self.index_points(ori_kappa_std.unsqueeze(2), central_points_idx).squeeze(2)    # [b, central]
@@ -183,9 +181,9 @@ class HiT_ADV:
             perturb_mat.requires_grad_()
             gauss_delta.requires_grad_()
 
-            bestdist = np.array([1.0] * B)
+            bestdist = np.array([1e6] * B)
             bestscore = np.array([1e6] * B)
-            bestattack = np.zeros((B, 3, K))
+            bestattack = torch.zeros((B, K, 6)).to(ori_pc.device, dtype=ori_pc.dtype)
             success_attack = np.zeros(B, dtype=np.int32)
             eval_results = None
             # 5 3
@@ -241,27 +239,14 @@ class HiT_ADV:
 
                 t2 = time.time()
                 forward_time += t2 - t1
-
-                # # print
-                # pred = torch.argmax(logits, dim=1)  # [B]
-                # # tar*
-                # success_num = (pred != target).sum().item()
-                # if iteration % (self.num_iter // 5) == 0:
-                #     print('Step {}, iteration {}, success {}/{}\n'
-                #           'adv_loss: {:.4f}, dist_loss: {:.4f}'.
-                #           format(binary_step, iteration, success_num, B,
-                #                  adv_loss.item(), dist_loss.item()))
                 
                 dist_loss = torch.tensor(0.).cuda()
                 dist_val = self.transformation_loss(tmp_adv_data, perturb_mat, gauss_delta, batch_avg=False)
                 dist_val = dist_val.detach().cpu().numpy()
 
-                adv_loss_val = adv_loss.detach().to(torch.float32).cpu().numpy()  # [B]
-                input_val = tmp_adv_data.detach().cpu().numpy()  # [B, 3, K]
-                # perturb_mat_val = perturb_mat.view(self.central_num, B, 3).transpose(0,
-                #                                                                     1).clone().detach().cpu().numpy()  # [B, central_num, 3]
-                # gauss_delta_val = gauss_delta.clone().detach().cpu().numpy()
-
+                adv_loss_val = adv_loss.detach().float().cpu().numpy()
+                input_val = input_adv_data.detach() #.float().cpu().numpy()
+                #tmp_adv_data.detach().float().cpu().numpy()
                 # update
                 for e, (dist, al, ii) in \
                         enumerate(zip(dist_val, adv_loss_val, input_val)):
@@ -269,7 +254,7 @@ class HiT_ADV:
                     if   al < bestscore[e]:   
                         bestdist[e] = dist
                         bestscore[e] = al
-                        bestattack[e] = ii
+                        bestattack[e] = ii 
 
                 t3 = time.time()
                 update_time += t3 - t2
@@ -325,8 +310,9 @@ class HiT_ADV:
                         #'o_bestdist:': o_bestdist.mean(),
                     })
 
-            eval_adv_data = input_adv_data.detach()
-            success_attack, eval_results = self.eval_func(eval_adv_data, target)
+            # eval_adv_data = input_adv_data.detach()
+            with torch.no_grad():
+                success_attack, eval_results = self.evaluator(bestattack, target)
             
             for e in range(B):
                 if success_attack[e] == 1 and bestdist[e] <= o_bestdist[e]:
@@ -367,9 +353,9 @@ class HiT_ADV:
         success_num = np.sum(o_success_attack)
         print('Successfully attack {}/{}'.format(success_num, B))
         
-        saved_xyz = o_bestattack.transpose((0, 2, 1))  # [B, K, 3]
-        saved_normal = ori_normal.transpose(1, 2).contiguous()  # [B, N, 3]
-        o_adv_pc = np.concatenate((saved_xyz, ori_color.float().cpu().numpy(), saved_normal.float().cpu().numpy()), axis=-1)  # [B, K, 9]
+        # saved_xyz = o_bestattack.transpose((0, 2, 1))  # [B, K, 3]
+        saved_normal = ori_normal.transpose(1, 2).contiguous()  # [B, K, 3]
+        o_adv_pc = torch.cat((o_bestattack, saved_normal), dim=-1)  # [B, K, 9]
         return o_adv_pc, success_num, o_eval_results
 
     def chamfer_distance(self, points1, points2):

@@ -107,7 +107,7 @@ def start_pc_evaluation(ori_pc_list, adv_pc_list, obj_id_list, output_eval_dir, 
         pc_result['obj_id'] = obj_id
         results.append(pc_result)
         
-    print("re-evaluated ASR:", len(statistic_adv_xyz) / len(adv_pc_list) )
+    # print("re-evaluated ASR:", len(statistic_adv_xyz) / len(adv_pc_list) )
         
     average_results = {}
     for metrics, values in overall_results.items():

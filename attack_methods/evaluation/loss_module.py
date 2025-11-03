@@ -27,9 +27,10 @@ class FeatureSimilarityLoss(torch.nn.Module):
         embedding_sim = torch.mean(torch.sum(adv_feature * tgt_feature, dim=2), dim=1)
         
         # Add L2 distance loss to improve feature similarity loss
-        l2_loss = torch.mean(torch.norm(adv_feature - tgt_feature, dim=2))
+        # l2_loss = torch.mean(torch.norm(adv_feature - tgt_feature, dim=2))
         # Combine cosine similarity loss and L2 loss
-        loss = (1 - embedding_sim) + 0.1*l2_loss if self.is_targeted else embedding_sim - 0.1*l2_loss
+        # loss = (1 - embedding_sim) + 0.1*l2_loss if self.is_targeted else embedding_sim - 0.1*l2_loss
+        loss = 1 - embedding_sim if self.is_targeted else embedding_sim
         return loss
 
 

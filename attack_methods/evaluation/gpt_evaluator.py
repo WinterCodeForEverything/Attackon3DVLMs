@@ -120,19 +120,27 @@ class OpenAIGPT():
 
 
 class GPTEvaluation(torch.nn.Module):
-    def __init__(self, Generation, gpt_type, is_targeted=True):   
+    def __init__(self, Generation, 
+                        gpt_type, 
+                        is_targeted=True,
+                        has_defense=False,
+                        defensor=None):   
         super(GPTEvaluation, self).__init__()
         self.Generation = Generation
         self.gpt_prompt = gpt4_open_free_from_cls_prompt 
         self.invalid_responses = 0
         self.is_targeted = is_targeted
+        self.has_defense = has_defense
+        self.defensor = defensor
+        assert (not has_defense) or (defensor is not None), "Defensor must be provided if has_defense is True."
+        
         
 
         self.default_chat_parameters = {
             "model": gpt_type,
             "temperature": 1, 
             "top_p": 1, 
-            "max_tokens": 2048
+            "max_tokens": 1024
         }
 
         
@@ -141,66 +149,38 @@ class GPTEvaluation(torch.nn.Module):
         
     def forward(self, adv_pc, tgt_labels ):
         
+        if self.has_defense:
+            adv_pc = self.defensor(adv_pc)
+        
         if adv_pc.shape[-1] > 6:
             adv_pc = adv_pc[..., :6]
+        
             
         model_outputs = self.Generation.generate(adv_pc) # * B, L'
         
         B = adv_pc.shape[0]
         accuracies = np.zeros(B, dtype=np.int32)
-        results = []
-        
-        batched_prompt = ""
-        batch_indices = []
+        results = []    
+            
         for i in range(B):
-            batched_prompt += f"Example {i+1}:\nInput: 1. {tgt_labels[i]} 2. {model_outputs[i]}\nOutput:\n"
-            batch_indices.append(i)
-
-        messages = [{"role": "user", "content": self.gpt_prompt.replace("Now, analyze the following:\nInput: 1. {ground_truth} 2. {model_output}  \nOutput:", batched_prompt)}]
-
-        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
-        gpt_response_content = gpt_response['choices'][0]["message"]['content']
-
-        # Split responses by "Example" and parse each
-        response_blocks = re.split(r'Example \d+:\s*', gpt_response_content)
-        response_blocks = [block.strip() for block in response_blocks if block.strip()]
-
-        for i, block in enumerate(response_blocks):
-            # Expecting "Output: T#reason" or "T#reason"
-            output_line = block.split('\n')[-1].replace("Output:", "").strip()
-            accuracy, cls_result, reason = self.parse_gpt_response_evaluate(output_line)
-            if not self.is_targeted:
-                accuracy = 1 - accuracy
-            accuracies[i] = accuracy
             result = {
                 'ground_truth': tgt_labels[i],
                 'model_output': model_outputs[i],
+                
+            }
+            accuracy, cls_result, reason = self.evaluate_result( result )
+            if not self.is_targeted:
+                accuracy = 1 - accuracy # * for untargeted attack, we want to maximize the difference
+            # accuracy =
+            accuracies[i] = accuracy
+            result.update({
                 'accuracy': accuracy,
                 'cls_result': cls_result,
                 'reason': reason
-            }
+            })
+            # print(result)
             results.append(result)
-            
-            
-        # for i in range(B):
-        #     result = {
-        #         'ground_truth': tgt_labels[i],
-        #         'model_output': model_outputs[i],
-                
-        #     }
-        #     accuracy, cls_result, reason = self.evaluate_result( result )
-        #     if not self.is_targeted:
-        #         accuracy = 1 - accuracy # * for untargeted attack, we want to maximize the difference
-        #     # accuracy =
-        #     accuracies[i] = accuracy
-        #     result.update({
-        #         'accuracy': accuracy,
-        #         'cls_result': cls_result,
-        #         'reason': reason
-        #     })
-        #     # print(result)
-        #     results.append(result)
-        # # print(results)
+        # print(results)
 
         return accuracies, results
     
@@ -331,6 +311,7 @@ class GPTBatchEvaluation(torch.nn.Module):
 
         for i in range(B):
             output_line = output_lines[i].strip()
+            # print(f"Output {i+1}: {output_line}")
             accuracy, cls_result, reason = self.parse_gpt_response_evaluate(output_line)
             if not self.is_targeted:
                 accuracy = 1 - accuracy
@@ -397,7 +378,7 @@ class GPTObjectCaptioningEvaluator(torch.nn.Module):
             "model": gpt_type,
             "temperature": 1, 
             "top_p": 1, 
-            "max_tokens": 2048
+            "max_tokens": 4096
         }
 
         
@@ -518,7 +499,7 @@ class GPTObjectCaptioningBatchEvaluator(torch.nn.Module):
             "model": gpt_type,
             "temperature": 1,
             "top_p": 1,
-            "max_tokens": 2048
+            "max_tokens": 2096
         }
         self.openaigpt = OpenAIGPT(**self.default_chat_parameters)
 

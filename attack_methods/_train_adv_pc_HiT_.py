@@ -1,107 +1,34 @@
 #from pointllm.model.pointllm import PointLLMLlamaForCausalLM, PointLLMLlamaModel 
 import argparse
 import numpy as np
+import datetime
 import torch
-# from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
 
 
 # from tqdm import tqdm
-from transformers import AutoTokenizer
 import os
 import wandb
 from attack_methods.ShapeAttack.HiT_ADV import HiT_ADV
 import pickle
 import json
 
-from dataset.data.modelnet import ModelNet
-from dataset.data.objaverse import ObjaverseDataset
-from dataset.data.utils import compute_normals, redirect_normals
-
-
 from victim_models.gpt4point.models import load_model_and_preprocess
-from victim_models.pointllm.conversation import conv_templates
-from victim_models.pointllm.utils import disable_torch_init
-from victim_models.pointllm.model import PointLLMLlamaForCausalLM
+from victim_models.pointllm.initialization import init_PointLLM
+
 
 from attack_methods.evaluation.loss_module import FeatureSimilarityLoss, GPT4PointCaptionLoss, PointLLMCaptionLoss
 
 from attack_methods.evaluation.model_generator import PointLLMGenerator, GPT4PointGenerator
-from attack_methods.evaluation.gpt_evaluator import GPTBatchEvaluation, GPTObjectCaptioningEvaluator
+from attack_methods.evaluation.gpt_evaluator import GPTEvaluation, GPTBatchEvaluation, GPTObjectCaptioningEvaluator
 
 # from attack_methods.ModelNet40.evaluate import Evaluation
 from attack_methods.evaluation.pc_evaluator.pc_evaluator import start_pc_evaluation
+from attack_methods.helper import load_attack_results, setup_seed, feature_normalize, get_defensor
+from dataset.data.dataloader import load_dataset, get_dataloader
 
-
-
-def init_PointLLM(model_name, dtype, device, is_eval=True):
-    # Model
-    disable_torch_init()
-    model_name = os.path.expanduser(model_name)
-
-    # * print the model_name (get the basename)
-    print(f'[INFO] Model name: {os.path.basename(model_name)}')
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True, torch_dtype=dtype).to(device)
-    if is_eval:
-        model.eval()
-    model.get_model().fix_pointnet = False
-    model.get_model().fix_llm = False
-    model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
-    
-    conv_mode = "vicuna_v1_1"
-
-    conv = conv_templates[conv_mode].copy()
-    
-    #stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    qs = "What is this?"
-
-    point_backbone_config = model.get_model().point_backbone_config
-    point_token_len = point_backbone_config['point_token_len']
-    default_point_patch_token = point_backbone_config['default_point_patch_token']
-    default_point_start_token = point_backbone_config['default_point_start_token']
-    default_point_end_token = point_backbone_config['default_point_end_token']
-    mm_use_point_start_end = point_backbone_config['mm_use_point_start_end']
-    
-    if mm_use_point_start_end:
-        qs = default_point_start_token + default_point_patch_token * point_token_len + default_point_end_token + '\n' + qs
-    else:
-        qs = default_point_patch_token * point_token_len + '\n' + qs
-    
-    #qs = qs + "This is an object of "
-    conv.append_message(conv.roles[0], qs)
-
-    return model, tokenizer, conv
-
-
-def load_dataset(dataset_type, data_path, anno_path=None, normalized_pc=True,
-                 has_color=True, has_normal=True, redirect_normals=False,
-                 use_color=True, use_normal=True, pts_processor=None, text_processor=None):
-    # print(f"Loading {split} split of ModelNet datasets.")
-    if dataset_type == 'ModelNet':
-        dataset = ModelNet(data_path=data_path, normalized_pc=normalized_pc,
-                           has_color=has_color, has_normal=has_normal,
-                           redirect_normals=redirect_normals, use_color=use_color, use_normal=use_normal,
-                           pts_processor=pts_processor, text_processor=text_processor )
-    elif dataset_type == 'Objaverse':
-        dataset = ObjaverseDataset(data_path=data_path, anno_path=anno_path, 
-                                   normalized_pc=normalized_pc, has_color=has_color, has_normal=has_normal,
-                                   redirect_normals=redirect_normals, use_color=use_color, use_normal=use_normal,
-                                   pts_processor=pts_processor, text_processor=text_processor)
-    print("Done!")
-    return dataset
-
-
-def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
-    assert shuffle is False, "Since we using the index of ModelNet as Object ID when evaluation \
-        so shuffle shoudl be False and should always set random seed."
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
-    return dataloader
-
-    
 def main(args):
     
+    setup_seed(42)
     valid_state = 1
     #lr = args.lr
     #budget = args.budget
@@ -116,66 +43,33 @@ def main(args):
     device = args.device
     dtype = getattr(torch, args.dtype)
     negitive_samples_filter_eval_path = args.negitive_samples_filter_eval_path
-    #pointnum = args.pointnum
-    #prompt_index = args.prompt_index
-    #batch_size = args.batch_size
-    
-    if dataset_type == 'Objaverse' and  not os.path.exists(args.adv_anno_path):
-        ori_annos = json.load(open(args.ori_anno_path, "r"))
-        tgt_annos = json.load(open(args.tgt_anno_path, "r"))
-        adv_annos = []
-        for i in range(len(ori_annos)):
-            adv_anno = tgt_annos[i].copy()
-            adv_anno['object_id'] = f"{ori_annos[i]['object_id']}_{tgt_annos[i]['object_id']}"
-            adv_annos.append(adv_anno)
-        with open(args.adv_anno_path, "w") as f:
-            json.dump(adv_annos, f, indent=4)
-    elif dataset_type == 'Objaverse' and os.path.exists(args.adv_anno_path):
-        adv_annos = json.load(open(args.adv_anno_path, "r"))
     
     success_rate = 0.0
     average_gpt_score = 0.0
-    saved_results = {}  #{"prompt": PROMPT_LISTS[args.prompt_index] }
+    saved_results = {} 
     eval_results = []
     attack_id_list, attack_pc_list = [], []
     adv_pc_file_name_list = []
     adv_pc_list, adv_label_list = [], []
     
-    output_file = f"{dataset_type}_classification_prompt_{args.prompt_index}_evaluated_{args.gpt_type}_in_training.json"
+    output_file = f"{dataset_type}_{task_type}_{args.gpt_type}_in_training.json"
     output_eval_file = os.path.join(args.output_eval_path, output_file )
     if not os.path.exists(args.output_eval_path):
         os.makedirs(args.output_eval_path)
     elif os.path.exists(output_eval_file) and os.path.exists(output_pc_path):
-        eval_data = json.load(open(output_eval_file, "r"))
-        eval_results = eval_data.get('eval_results', [])
-        success_rate = eval_data.get('ASR', 0.0)
-        average_gpt_score = eval_data.get('average_gpt_score', 0.0)
-        for eval_result in eval_results:
-            attack_id_list.append(eval_result['object_id']) # * use index as object id
-        if dataset_type == 'ModelNet':
-            adv_pc_list, adv_label_list = pickle.load(open(output_pc_path, "rb"))
-            total_ori_pc_list, _ = pickle.load(open(args.ori_data_path, "rb")) 
-            if is_targeted:
-                attack_pc_list = [total_ori_pc_list[int(attack_id.split('_')[0])] for attack_id in attack_id_list]
-            else:
-                attack_pc_list = [total_ori_pc_list[int(attack_id)] for attack_id in attack_id_list] #.split('_')[0]
-        elif dataset_type == 'Objaverse':
-            for i, file in enumerate(os.listdir(output_pc_path)):
-                if file.endswith('.npy'):
-                    adv_pc_file_name_list.append(file)
-                    adv_pc = np.load(os.path.join(output_pc_path, file))
-                    adv_pc_list.append(adv_pc)
-                    assert adv_annos[i]['conversations'][1]['from'] == 'gpt'
-                    adv_label = adv_annos[i]['conversations'][1]['value']
-                    adv_label_list.append(adv_label)
-                    
-                    attack_pc_name = file.split('_')[0] + f"_{args.pointnum}.npy"
-                    attack_pc = np.load(os.path.join(args.ori_data_path, attack_pc_name))
-                    attack_pc_list.append(attack_pc)
-            
+        ( success_rate, 
+         average_gpt_score, 
+         adv_pc_list, 
+         adv_label_list, 
+         attack_id_list,
+         attack_pc_list, 
+         eval_results ) = load_attack_results( args.ori_data_path, args.ori_anno_path, args.tgt_anno_path, args.adv_anno_path,
+                                             output_eval_file, output_pc_path, dataset_type, is_targeted ) 
         
         assert len(adv_pc_list) == len(eval_results), "The length of adversarial point clouds and evaluation results should be the same."
         print(f"Loaded {len(eval_results)} evaluation results")
+        
+    print('attack_id_list:', attack_id_list)
     
     if args.start_pc_eval and not args.start_gpt_eval:
         print("Starting point cloud evaluation...")
@@ -187,10 +81,24 @@ def main(args):
 
         return valid_state
         
+    # if args.wandb:
+    #     run = wandb.init(project=args.wandb_project_name, 
+    #                     name=args.wandb_run_name, 
+    #                     id=args.wandb_run_name,
+    #                     resume="allow",          # "allow" will resume if run exists, otherwise create new
+    #                     reinit="finish_previous"
+    #                     )
+        
     if args.wandb:
-        run = wandb.init(project=args.wandb_project_name, 
-                        name=args.wandb_run_name, 
-                        reinit=True)
+        current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{args.wandb_run_name}_{current_time}"
+        run = wandb.init(
+            project=args.wandb_project_name,
+            name=run_name,
+            id=run_name,  # Use run_name as the run id for resuming
+            resume="allow",          # "allow" will resume if run exists, otherwise create new
+            reinit='finish_previous',
+        )
     
     if attack_method == 'vision_attack':
         if 'gpt4point' in model_type:
@@ -219,32 +127,35 @@ def main(args):
             adv_func = PointLLMCaptionLoss(model, tokenizer, conv, is_targeted=is_targeted ) 
             # generator = PointLLMGenerator(model=model, tokenizer=tokenizer, conv=conv, llm_args=args)
             generator = PointLLMGenerator( model, tokenizer, conv, args )
+    
+    defensor = get_defensor( args.defend_method, npoint=args.pointnum ) if args.has_defense else None
         
     if task_type == 'classification':
-        eval_func = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+        # evaluator = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+        if 'gpt4point' in model_type:
+            evaluator = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+        elif 'pointllm' in model_type:
+             evaluator = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted, has_defense=args.has_defense, defensor=defensor )
     elif task_type == 'captioning':
-        eval_func = GPTObjectCaptioningEvaluator( generator, args.gpt_type, is_targeted=is_targeted,
+        evaluator = GPTObjectCaptioningEvaluator( generator, args.gpt_type, is_targeted=is_targeted,
                                                   success_score_threshold=args.success_score_threshold )
         
-    ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, anno_path= args.ori_anno_path,
-                                normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
+    ori_dataset = load_dataset( dataset_type = dataset_type, data_path= args.ori_data_path, category_file= args.modelnet_cat_file,
+                               anno_path= args.ori_anno_path, normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
                                     redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
                                     pts_processor= vis_processors['eval'] if 'gpt4point' in model_type else None,
                                     text_processor=txt_processors['eval'] if 'gpt4point' in model_type else None )
     ori_dataloader = get_dataloader(ori_dataset, args.batch_size, args.shuffle, args.num_workers)
     
-    tgt_dataset = load_dataset( dataset_type = dataset_type, data_path= args.tgt_data_path, anno_path= args.tgt_anno_path,
-                                normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
+    tgt_dataset = load_dataset( dataset_type = dataset_type, data_path= args.tgt_data_path, category_file= args.modelnet_cat_file, 
+                               anno_path= args.tgt_anno_path, normalized_pc=args.normalized_pc, has_color=args.has_color, has_normal=args.has_normal,
                                     redirect_normals=args.redirect_normal, use_color=args.use_color, use_normal=args.use_normal,
                                     pts_processor= vis_processors['eval'] if 'gpt4point' in model_type else None,
                                     text_processor=txt_processors['eval'] if 'gpt4point' in model_type else None )
     tgt_dataloader = get_dataloader(tgt_dataset, args.batch_size, args.shuffle, args.num_workers)
 
 
-
-
-
-    HiT_attacker = HiT_ADV( adv_func, eval_func, attack_lr=args.attack_lr,
+    HiT_attacker = HiT_ADV( adv_func, evaluator, attack_lr=args.attack_lr,
                             central_num=args.central_num, total_central_num=args.total_central_num,
                             init_weight=args.init_weight, max_weight=args.max_weight, binary_step=args.binary_step,
                             num_iter=args.num_iter, clip_func=None,
@@ -256,9 +167,7 @@ def main(args):
         
     success_nums = success_rate * len(attack_pc_list)
     total_gpt_score = average_gpt_score * len(attack_pc_list)
-    if dataset_type == 'ModelNet':
-        modelnet_cat_list = [line.rstrip() for line in open(args.modelnet_cat_file)]
-    
+
     pretrained_eval_results_dict = {}
     if negitive_samples_filter_eval_path is not None:
         pretrained_eval_results = json.load(open(negitive_samples_filter_eval_path, "r")).get('results', [])
@@ -274,37 +183,21 @@ def main(args):
             ori_id = ori_data_dict['object_id']
             tgt_id = tgt_data_dict['object_id']   
             ori_pc = ori_data_dict['point_cloud'].to(device=device, dtype=dtype)
-
-            if dataset_type == 'ModelNet':
-                ori_labels = [modelnet_cat_list[label.item()] for label in ori_data_dict['label']]
-            else:
-                ori_labels = ori_data_dict['label']
+            ori_labels = ori_data_dict['label']
 
             if is_targeted:
-                if dataset_type == 'ModelNet':
-                    tgt_labels =  [modelnet_cat_list[label.item()] for label in tgt_data_dict['label']]
-                else:
-                    tgt_labels = tgt_data_dict['label']
+                tgt_labels = tgt_data_dict['label']
                 if attack_method == 'vision_attack':
                     with torch.no_grad():
                         tgt_pc = tgt_data_dict['point_cloud'].to(device, dtype=dtype) # * convert to float32
-                        tgt_feature = pc_encoder(tgt_pc[..., :6])
-                        if torch.isnan(tgt_feature).any():
-                            print(f"NaN detected in tgt_feature. Skip this sample.")
-                            continue
-                        tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
+                        tgt_feature = feature_normalize(pc_encoder(tgt_pc[..., :6]))
                 else:
                     tgt_feature = None
             else:
-                
                 tgt_labels = ori_labels
                 if attack_method == 'vision_attack':
                     with torch.no_grad():
-                        tgt_feature = pc_encoder(ori_pc[..., :6])
-                        if torch.isnan(tgt_feature).any():
-                            print(f"NaN detected in tgt_feature. Skip this sample.")
-                            continue
-                        tgt_feature = tgt_feature / tgt_feature.norm(dim=2, keepdim=True)
+                        tgt_feature = feature_normalize(pc_encoder(ori_pc[..., :6]))
                 else:
                     tgt_feature = None
                 
@@ -312,10 +205,7 @@ def main(args):
             attack_ori_labels, attack_tgt_labels = [], []   
             attack_tgt_features = [] if tgt_feature is not None else None  
             for j in range(len(ori_id)):
-                if is_targeted:
-                    attack_id = f"{ori_id[j]}_{tgt_id[j]}"  
-                else:
-                    attack_id = f"{ori_id[j]}"  
+                attack_id = f"{ori_id[j]}_{tgt_id[j]}" if is_targeted  else f"{ori_id[j]}" 
 
                 if attack_id not in attack_id_list: 
                     attack_ids.append(attack_id)
@@ -327,7 +217,6 @@ def main(args):
             if len(attack_ids) == 0:
                 print(f"Skip {i}th batch, since all the objects have been evaluated.")
                 continue    
-            
                 
             attack_pcs = torch.stack(attack_pcs, dim=0)
             attack_tgt_features = torch.stack(attack_tgt_features, dim=0) if attack_tgt_features is not None else None
@@ -339,16 +228,14 @@ def main(args):
                 predict_accuracies = [result['accuracy'] for result in evaluation_results]
                 predict_accuracies = torch.tensor(predict_accuracies, dtype=torch.int, device=device) 
             else:
-                predict_accuracies, evaluation_results = eval_func(attack_pcs, attack_ori_labels)
+                predict_accuracies, evaluation_results = evaluator(attack_pcs, attack_ori_labels)
                 predict_accuracies = 1 - predict_accuracies if not is_targeted else predict_accuracies
             
             if predict_accuracies.sum() == 0:
-                print(evaluation_results)
+                # print(evaluation_results)
                 print(f"Skip {i}th batch, since all data are negative samples.")
                 continue
         
-            # print(attack_ids)
-            # print(predict_accuracies)
             # Only keep attack_ids where predict_accuracies == 1
             attack_ids = [attack_ids[idx] for idx, acc in enumerate(predict_accuracies) if acc == 1]
             # print(attack_ids)
@@ -370,7 +257,8 @@ def main(args):
                 if is_targeted:
                     eval_result[j].update({'original_label': attack_ori_label} )
             eval_results.extend(eval_result)
-            
+
+            adv_pcs = adv_pcs.float().cpu().numpy()
             attack_pcs = attack_pcs.float().cpu().numpy()
             
             for attack_id, attack_pc, adv_pc, attack_tgt_label in  zip(attack_ids, attack_pcs, adv_pcs, attack_tgt_labels):
@@ -379,19 +267,20 @@ def main(args):
                     adv_pc_file_name_list.append(f"{attack_id}_{args.pointnum}.npy")
                 attack_pc_list.append(attack_pc)
                 adv_pc_list.append(adv_pc)
-                adv_label_list.append(attack_tgt_label)            
-            # break
+                adv_label_list.append(attack_tgt_label)
+            # if i >= 10:
+            #     break
             
     except Exception as e:
         valid_state = 0
         print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
 
     saved_results['attack_pc_number'] = len(attack_pc_list)
-    success_rate = success_nums / len(attack_pc_list)
+    success_rate = success_nums / len(attack_pc_list) if len(attack_pc_list) > 0 else 0.0
     print("attack success rate: ", success_rate) 
     saved_results['ASR'] = success_rate
     if task_type == 'captioning':
-        average_gpt_score = total_gpt_score / len(attack_pc_list)
+        average_gpt_score = total_gpt_score / len(attack_pc_list) if len(attack_pc_list) > 0 else 0.0
         print("average gpt score: ", average_gpt_score)
         saved_results['average_gpt_score'] = average_gpt_score
     saved_results['eval_results'] = eval_results
@@ -429,7 +318,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     
-    # model
+    # victim model config
     parser.add_argument("--model_name", type=str, \
         default="RunsenXu/PointLLM_7B_v1.2") 
     parser.add_argument("--model_type", type=str, \
@@ -443,6 +332,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--top_p", type=float, default=0.95)
     
+    # attack config
     parser.add_argument("--task_type", type=str, default="classification", choices=["classification", "captioning"], help="Task type for the attack.")
     parser.add_argument("--attack_method",  type=str, default="vision_attack", choices=["vision_attack", "caption_attack"])
     parser.add_argument("--is_targeted",  action="store_true", default=False)
@@ -454,7 +344,6 @@ if __name__ == '__main__':
     parser.add_argument('--min_sigm', type=float, default=0.1, help='min_sigm')
     parser.add_argument('--init_weight', type=float, default=1.0, help='init_weight')
     parser.add_argument('--max_weight', type=float, default=8.0, help='max_weight')
-    parser.add_argument("--prompt_index", type=int, default=0, choices=[0, 1], help="0: What is this? 1: This is an object of ")
     parser.add_argument('--success_score_threshold', type=int, default=50, help='Success score threshold for the attack on captioning task.')
 
     parser.add_argument('--central_num', type=int, default=26)
@@ -462,12 +351,15 @@ if __name__ == '__main__':
     parser.add_argument('--curv_loss_knn', type=int, default=16, metavar='N', help='Num of nearest neighbors to use')
     parser.add_argument('--budget', type=float, default=0.55,
                         help='0.5 for l2 attack, 0.05 for linf attack')
-    
-    #CWPerturb_args
+
     parser.add_argument('--binary_step', type=int, default=10, metavar='N',
                         help='Binary search step')
     parser.add_argument('--num_iter', type=int, default=100, metavar='N',
                         help='Number of iterations in each search step')
+    
+    # defense config
+    parser.add_argument("--has_defense",  action="store_true", default=False)
+    parser.add_argument("--defend_method", type=str, default="sor", choices=["sor", "srs", "dupnet"], help="Defense method to use.")
     
     # parser.add_argument("--epsilon", type=float, default=1.0)
     # parser.add_argument("--gamma1", type=float, default=1.0)
@@ -477,7 +369,7 @@ if __name__ == '__main__':
     parser.add_argument("--start_pc_eval",  action="store_true", default=False)
     parser.add_argument("--negitive_samples_filter_eval_path", type=str, default=None, help="Path to save the evaluation results of negative samples filter.")
     parser.add_argument("--start_gpt_eval",  action="store_true", default=False)
-    parser.add_argument("--gpt_type", type=str, default="gpt-4o-mini", choices=[ "gpt-4.1-mini", "gpt-4o-mini"], help="Type of the model used to evaluate.")
+    parser.add_argument("--gpt_type", type=str, default="gpt-4o-mini", choices=[ "gpt-5-nano", "gpt-4o-mini"], help="Type of the model used to evaluate.")
     parser.add_argument("--output_eval_path", type=str, default='./eval_results', help="Path to save the evaluation results.")
     
 
@@ -489,6 +381,7 @@ if __name__ == '__main__':
     parser.add_argument("--ori_anno_path", type=str, default=None)
     parser.add_argument("--adv_anno_path", type=str, default=None)
     parser.add_argument("--tgt_anno_path", type=str, default=None)
+    parser.add_argument("--do_preprocess", type=bool,  default=True)
     parser.add_argument("--normalized_pc", type=bool,  default=False)
     parser.add_argument("--has_color",  type=bool,  default=True)
     parser.add_argument("--has_normal",  type=bool,   default=True)
@@ -507,6 +400,7 @@ if __name__ == '__main__':
     parser.add_argument("--wandb", action="store_true", default=False)
     parser.add_argument("--wandb_project_name", type=str, default='temp_proj')
     parser.add_argument("--wandb_run_name", type=str, default='temp_run')
+    # parser.add_argument("--wandb_run_id", type=str, default=None, help="wandb run id for resuming the run")
 
     args = parser.parse_args()
 

@@ -6,9 +6,11 @@ from .utils import *
 
 class ModelNet(Dataset):
     def __init__(self, data_path, 
+                 category_file,
                  normalized_pc=True,
                  has_color=False,
                  has_normal=True,
+                 do_preprocess=True,
                  redirect_normals=False,
                  use_color=True,
                  use_normal=True,
@@ -19,6 +21,7 @@ class ModelNet(Dataset):
         self.normalized_pc = normalized_pc
         self.has_color = has_color
         self.has_normal = has_normal
+        self.do_preprocess = do_preprocess
         self.redirect_normals = redirect_normals
         self.use_color = use_color
         self.use_normal = use_normal
@@ -30,7 +33,9 @@ class ModelNet(Dataset):
 
         with open(data_path, 'rb') as f:
             self.list_of_points, self.list_of_labels = pickle.load(f)
-        
+
+        self.category_list = [line.rstrip() for line in open(category_file)]
+
         # * print len
         print(f"Load {len(self.list_of_points)} data from {data_path}.")
 
@@ -80,6 +85,7 @@ class ModelNet(Dataset):
 
     
     def _points_preprocess(self, point_cloud):
+        # print('do points preprocess')
         """Preprocess the point cloud data."""
         if self.normalized_pc:
             point_cloud = pc_normalize(point_cloud)
@@ -115,7 +121,10 @@ class ModelNet(Dataset):
         # print(f"Loading point cloud {index}...")
         point_cloud, label = self.list_of_points[index], self.list_of_labels[index]
         
-        point_cloud = self._points_preprocess(point_cloud)
+        if self.do_preprocess:
+            point_cloud = self._points_preprocess(point_cloud)
+        if not isinstance(label, str):
+            label = self.category_list[label.item()]
 
         return {
             "object_id": index,

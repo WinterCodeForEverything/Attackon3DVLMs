@@ -58,7 +58,7 @@ class GPT4Point_OPT(GPT4Point_Base):
 
         '''Point: PIT'''
         self.point_encoder = GPT4Point_Base.init_point_encoder(point_model, point_encoder_cfg)
-        print("Point encoder initialized with model:", point_model)
+        # print("Point encoder initialized with model:", point_model)
         '''Point projection'''
         self.pc_projection = nn.Parameter(torch.empty(point_encoder_cfg['trans_dim'], 1408))      # cannot be frozen cause it is defined by ourselves.
         
@@ -73,7 +73,7 @@ class GPT4Point_OPT(GPT4Point_Base):
             layer.output = None
             layer.intermediate = None
             
-        print("Point encoder initialized with point_encoder_cfg:", point_encoder_cfg)
+        # print("Point encoder initialized with point_encoder_cfg:", point_encoder_cfg)
 
         '''OPT and freeze it'''
         self.opt_tokenizer = AutoTokenizer.from_pretrained(opt_model, use_fast=False)
