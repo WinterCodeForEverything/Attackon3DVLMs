@@ -269,7 +269,7 @@ def main(args):
                 adv_pc_list.append(adv_pc)
                 adv_label_list.append(attack_tgt_label)
             # if i >= 10:
-            #     break
+            break
             
     except Exception as e:
         valid_state = 0
@@ -292,6 +292,10 @@ def main(args):
             
     # * Save the adversarial point clouds and labels
     if dataset_type == 'ModelNet':
+        output_base_pc_path = os.path.dirname(output_pc_path)
+        print(f"Creating directory: {output_base_pc_path}")
+        if not os.path.exists(output_base_pc_path):
+            os.makedirs(output_base_pc_path)
         with open(output_pc_path, "wb") as f:
             pickle.dump((adv_pc_list, adv_label_list), f)
     else:

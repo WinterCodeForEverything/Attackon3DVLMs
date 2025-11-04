@@ -10,8 +10,8 @@ modelnet40_data
 *.zip
 *.ipynb
 serving_workdirs
-objaverse*_result
-modelnet40*_result
+objaverse*_result*
+modelnet40*_result*
 **/_eval_adv_pc_trans_*.sh
 eval_modelnet_cls.sh
 eval_pointllm_and_llava.sh
