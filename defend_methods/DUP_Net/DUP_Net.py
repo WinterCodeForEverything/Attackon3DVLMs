@@ -18,7 +18,7 @@ class DUPNet(nn.Module):
         super(DUPNet, self).__init__()
 
         self.npoint = npoint
-        self.sor = SORDefense(k=sor_k, alpha=sor_alpha)
+        self.sor = SORDefense(k=sor_k, alpha=sor_alpha, npoint=npoint)
         self.pu_net = PUNet(npoint=self.npoint, up_ratio=up_ratio,
                             use_normal=False, use_bn=False, use_res=False)
         self.pu_net.load_state_dict(torch.load(os.path.join(ROOT_DIR, 'pu-in_1024-up_4.pth')))
@@ -27,10 +27,12 @@ class DUPNet(nn.Module):
 
     def forward(self, x):
         with torch.enable_grad():
+            # print("#########", x.shape)
             x = self.sor(x)  # a list of pc
-            x = x.transpose(1, 2)
+            # x = x.transpose(1, 2)
             x = self.pu_net(x)  # [B, N * r, 3]
-            x = x.transpose(1, 2)
+            # x = x.transpose(1, 2)
+            # print("#########", x.shape)
         return x
 
 

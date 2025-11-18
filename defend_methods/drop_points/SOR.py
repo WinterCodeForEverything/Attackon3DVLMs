@@ -77,10 +77,11 @@ class SORDefense(nn.Module):
 
     def forward(self, x):
         with torch.enable_grad():
-            x = x.transpose(1, 2)
+            # x = x.transpose(1, 2)
             x = self.outlier_removal(x)
             x = self.process_data(x)  # to batch input
-            x = x.transpose(1, 2)
+            # x = x.transpose(1, 2)
+            # print("#########", x.shape)
         return x
 
 

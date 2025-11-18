@@ -260,12 +260,20 @@ Now, analyze the following:
 
 
 class GPTBatchEvaluation(torch.nn.Module):
-    def __init__(self, Generation, gpt_type, is_targeted=True):   
+    def __init__(self, Generation, 
+                        gpt_type, 
+                        is_targeted=True,
+                        has_defense=False,
+                        defensor=None):    
         super(GPTBatchEvaluation, self).__init__()
         self.Generation = Generation
         self.gpt_prompt = gpt4_open_free_from_cls_batched_prompt
         self.invalid_responses = 0
         self.is_targeted = is_targeted
+        self.has_defense = has_defense
+        self.defensor = defensor
+        assert (not has_defense) or (defensor is not None), "Defensor must be provided if has_defense is True."
+        
 
         self.default_chat_parameters = {
             "model": gpt_type,
@@ -278,6 +286,9 @@ class GPTBatchEvaluation(torch.nn.Module):
         # Ensure results length matches B by padding or truncating
 
     def forward(self, adv_pc, tgt_labels):
+        if self.has_defense:
+            adv_pc = self.defensor(adv_pc)
+        
         if adv_pc.shape[-1] > 6:
             adv_pc = adv_pc[..., :6]
 

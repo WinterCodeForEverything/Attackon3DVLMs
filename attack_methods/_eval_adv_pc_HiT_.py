@@ -110,7 +110,7 @@ def main(args):
     if task_type == 'classification':
         # evaluator = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
         if 'gpt4point' in model_type:
-            evaluator = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted )
+            evaluator = GPTBatchEvaluation( generator, args.gpt_type, is_targeted=is_targeted, has_defense=args.has_defense, defensor=defensor )
         elif 'pointllm' in model_type:
              evaluator = GPTEvaluation( generator, args.gpt_type, is_targeted=is_targeted, has_defense=args.has_defense, defensor=defensor )
     elif task_type == 'captioning':
@@ -143,8 +143,9 @@ def main(args):
     #     for result in pretrained_eval_results:
     #         pretrained_eval_results_dict[str(result['object_id'])] = result
 
-    # try:
-    if 1:
+    try:
+    # if 1:
+        # i = 0
         with torch.no_grad():
             for adv_data_dict in tqdm(adv_dataloader):
                 # if 'pointllm' in model_type and task_type == 'classification' and i % 4 != 0:
@@ -162,10 +163,13 @@ def main(args):
                 
                 success_nums += success_attack.sum().item()
                 total_nums += len(success_attack)
-                eval_results.extend(eval_result)       
-    # except Exception as e:
-    #     valid_state = 0
-    #     print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
+                eval_results.extend(eval_result)   
+                # i += 1 
+                # if i > 5:
+                # break   
+    except Exception as e:
+        valid_state = 0
+        print(f"Error occurred during the attack: {e}. Skipping the rest of the batches.")
 
     saved_results['attack_pc_number'] = total_nums
     success_rate = success_nums / total_nums if total_nums > 0 else 0.0
@@ -241,9 +245,9 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
-    valid_state = 0
-    while valid_state == 0:
-        valid_state = main(args)
+    # valid_state = 0
+    # while valid_state == 0:
+    valid_state = main(args)
 
 
 # if __name__ == '__main__':

@@ -90,7 +90,7 @@ def get_defensor( method, npoint=8192):
         method (str): defense method name.
     """
     if method == 'sor':
-        defensor = SORDefense(k=2, alpha=1.1)
+        defensor = SORDefense(k=2, alpha=1.1, npoint=npoint)
     elif method == 'srs':
         defensor = SRSDefense(drop_num=500)
     elif method == 'dupnet':

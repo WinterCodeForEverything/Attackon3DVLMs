@@ -269,7 +269,7 @@ def main(args):
                 adv_pc_list.append(adv_pc)
                 adv_label_list.append(attack_tgt_label)
             # if i >= 10:
-            break
+            # break
             
     except Exception as e:
         valid_state = 0

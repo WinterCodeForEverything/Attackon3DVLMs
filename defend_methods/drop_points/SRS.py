@@ -37,4 +37,5 @@ class SRSDefense(nn.Module):
             # x = x.transpose(1, 2).clone()
             x = self.random_drop(x)
             # x = x.transpose(1, 2)
+            # print("#########", x.shape)
         return x
