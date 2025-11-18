@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 line1 = {
     'color': 'blue',
     'name': 'vision attack on GPT4Point',
-    'CSD': [0.96, 1.72, 2.27, 2.95, 3.19, 3.45],
-    'ASR': [7.1, 19.1, 26, 33.6, 36.8, 40],
+    'CSD': [0.96, 1.72, 2.27, 3.19, 3.45],
+    'ASR': [7.1, 9.6, 12.6, 16.8, 18.4],
 }
 
 line2 = {
@@ -22,8 +22,8 @@ line2 = {
 line3 = {
     'color': 'red',
     'name': 'caption attack on GPT4Point',
-    'CSD': [ 1.31, 1.7, 2.78, 3.66], # 1.87,  2.14,
-    'ASR': [ 8.3, 14.9,  30.9, 40.8], # 18.4, 23.8,
+    'CSD': [ 1.51, 1.9, 3.08, 3.86, 4.08], # 1.87,  2.14,
+    'ASR': [ 8.3, 9.9,  15.9, 20.1, 20.5], # 18.4, 23.8,
 }
 
 line4 = {
@@ -60,7 +60,7 @@ CSD2_smooth, ASR2_smooth = smooth_curve(line2['CSD'], line2['ASR'])
 plt.figure(figsize=(8, 6))
 
 plt.rcParams.update({'legend.loc': 'upper left'})
-plt.rcParams.update({'legend.fontsize': 18, 'axes.labelsize': 20, 'xtick.labelsize': 18, 'ytick.labelsize': 18})
+plt.rcParams.update({'legend.fontsize': 16, 'axes.labelsize': 18, 'xtick.labelsize': 16, 'ytick.labelsize': 16})
 
 # Plot line1
 plt.plot(CSD1_smooth, ASR1_smooth, marker='o', linestyle='-', color=color1, label=name1)
