@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/icon.png" width="120" alt="Attackon3DVLMs icon">
-
 # On the Adversarial Robustness of 3D Large Vision-Language Models
 
 **Chao Liu, Ngai-Man Cheung**
@@ -18,21 +16,19 @@ We present the first systematic study of adversarial robustness in point-based 3
 - **Vision Attack**: perturbs the input point cloud so that the visual token features produced by the 3D encoder and projector are pushed away from (untargeted) or toward (targeted) a reference.
 - **Caption Attack**: directly manipulates the output token sequence of the language model.
 
-Our experiments show that 3D VLMs are highly vulnerable to untargeted attacks, but more resistant than 2D VLMs to targeted attacks that force specific outputs. We also evaluate common point-cloud defenses (SOR, SRS, DUP-Net) against these attacks.
+Our experiments show that 3D VLMs are highly vulnerable to untargeted attacks, but more resistant than 2D VLMs to targeted attacks that force specific outputs.
 
 <p align="center">
-  <img src="assets/qualitative_comparisons_v2.png" width="80%" alt="Qualitative comparisons">
+  <img src="assets/Attackon3DVLMs_pipeline.jpg" width="95%" alt="Attack pipeline">
 </p>
 
-## Results
+## Examples
 
-**Zero-shot classification (ModelNet40)**
+**Untargeted attack**
 
-<p align="center"><img src="assets/cls_results.png" width="95%" alt="Classification results"></p>
-
-**Object captioning (Objaverse)**
-
-<p align="center"><img src="assets/caption_results.png" width="95%" alt="Captioning results"></p>
+<p align="center">
+  <img src="assets/untargeted_example.jpg" width="95%" alt="Untargeted attack examples">
+</p>
 
 ## Repository Structure
 
@@ -47,9 +43,6 @@ Attackon3DVLMs/
 │   ├── evaluation/                # Losses, model generators, GPT-based & traditional caption evaluators
 │   ├── pointnet2_ops_lib/         # PointNet++ CUDA ops
 │   └── util/                      # Distance metrics, CLIP and misc utilities
-├── defend_methods/
-│   ├── drop_points/               # SOR and SRS defenses
-│   └── DUP_Net/                   # DUP-Net defense (with PU-Net checkpoint)
 ├── victim_models/
 │   ├── pointllm/                  # PointLLM
 │   └── gpt4point/                 # GPT4Point
@@ -58,7 +51,6 @@ Attackon3DVLMs/
 │   ├── preprocess/                # Point-cloud processing and ori/target pair sampling
 │   ├── Modelnet40/                # ModelNet40-specific helpers
 │   └── Objaverse/                 # Objaverse-specific helpers
-├── visualization/                 # ASR / score plots and point-cloud format conversion
 ├── environment.yml
 └── pyproject.toml
 ```
@@ -145,7 +137,6 @@ Key options:
 | `--is_targeted` | Targeted attack (default: untargeted) |
 | `--task_type` | `classification` or `captioning` |
 | `--dataset_type` | `ModelNet` or `Objaverse` |
-| `--has_defense --defend_method` | Apply a defense: `sor`, `srs`, or `dupnet` |
 | `--start_gpt_eval --gpt_type` | GPT-based evaluation (`gpt-4o-mini`, `gpt-5-nano`) |
 | `--wandb` | Log to Weights & Biases |
 
@@ -158,17 +149,12 @@ python -m attack_methods._eval_adv_pc_HiT_ \
     --task_type classification \
     --attack_method vision_attack \
     --adv_data_path <path/to/adv_pc> \
-    --start_pc_eval \
-    --has_defense --defend_method sor
+    --start_pc_eval
 ```
-
-### Visualization
-
-Scripts in `visualization/` plot ASR / caption scores and convert adversarial point clouds to `.ply` / `.xyz` for rendering.
 
 ## Acknowledgements
 
-This codebase builds on [PointLLM](https://github.com/OpenRobotLab/PointLLM), [GPT4Point](https://github.com/Pointcept/GPT4Point), [HiT-ADV](https://github.com/TRLou/HiT-ADV), [Pointnet2_PyTorch](https://github.com/erikwijmans/Pointnet2_PyTorch), and [DUP-Net](https://github.com/RyanHangZhou/DUP-Net). We thank the authors for releasing their code.
+This codebase builds on [PointLLM](https://github.com/OpenRobotLab/PointLLM), [GPT4Point](https://github.com/Pointcept/GPT4Point), [HiT-ADV](https://github.com/TRLou/HiT-ADV), and [Pointnet2_PyTorch](https://github.com/erikwijmans/Pointnet2_PyTorch). We thank the authors for releasing their code.
 
 ## Citation
 
