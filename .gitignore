@@ -15,7 +15,6 @@ modelnet40*_result*
 **/_eval_adv_pc_*.sh
 eval_modelnet_cls.sh
 eval_pointllm_and_llava.sh
-*.jpg
 **/statistic_ASR_per_category.py
 visualize*
 **/_train_adv_pc_*.sh
